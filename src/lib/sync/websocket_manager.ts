@@ -167,6 +167,12 @@ export class WebSocketManager {
         if (this.plugin.isSyncing) {
           this.plugin.isSyncing = false;
           this.plugin.isSyncRequesting = false;
+          // 连接断开后本轮同步已不可能继续：一并作废其 context，让仍在跑的扫描循环
+          // 在下一个让出点自行退出，否则它会一直扫到底并用作废的 context 发一轮数据
+          // The round can't continue once the socket is gone: invalidate its context so an
+          // in-flight scan bails out at its next yield point instead of scanning to completion
+          // and sending a full round under a dead context.
+          this.plugin.syncState.activeSyncContext = null;
         }
         clearUploadQueue();
         this.plugin.concurrencyLimiter.clear();
