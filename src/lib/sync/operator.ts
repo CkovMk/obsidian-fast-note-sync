@@ -750,6 +750,13 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
             plugin.syncState.activeSyncContext = null;
             return;
           }
+          // 本轮扫描已被新一轮同步取代（如手机切后台重连），立即退出，避免两轮扫描并发重复哈希
+          // This scan has been superseded by a newer sync (e.g. mobile background reconnect);
+          // bail out immediately so two scans never run concurrently
+          if (plugin.syncState.activeSyncContext !== context) {
+            dump(`[SyncContext] Scan (context=${context}) superseded, aborting vault scan.`);
+            return;
+          }
           const pct = Math.floor((processedCount / totalToProcess) * 100);
           plugin.progressTracker.recordHashProgress(pct);
           if (processedCount % 100 === 0) {
@@ -981,6 +988,12 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
         await sleep(0);
         if (isPluginUnloading) {
           plugin.syncState.activeSyncContext = null; // 插件卸载中，清空上下文 / Plugin unloading, reset the context
+          return;
+        }
+        // 同上：被新一轮同步取代时立即退出配置扫描
+        // Same as above: abort the config scan once superseded by a newer sync
+        if (plugin.syncState.activeSyncContext !== context) {
+          dump(`[SyncContext] Scan (context=${context}) superseded, aborting config scan.`);
           return;
         }
         const pct = overallTotal > 0 ? Math.floor(((baseProcessedCount + configCount) / overallTotal) * 100) : 100;
