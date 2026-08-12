@@ -879,6 +879,20 @@
       font-size: 12px;
       background: var(--background-secondary-alt);
 
+      // Hint shown when the per-line diff is skipped for large files
+      // 大文件跳过逐行差异对比时显示的提示
+      .conflict-diff-skipped {
+        padding: 16px 12px;
+        color: var(--text-muted);
+        font-size: 13px;
+        font-family: var(--font-interface);
+        line-height: 1.6;
+        text-align: center;
+        border: 1px dashed var(--background-modifier-border);
+        border-radius: 6px;
+        margin: 8px 4px;
+      }
+
       .history-detail-line {
         display: flex;
         align-items: center;
