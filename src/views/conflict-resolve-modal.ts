@@ -604,8 +604,13 @@ export class ConflictResolveModal extends Modal {
       });
       observer.observe(textarea);
 
-      // Clean up observer on close
-      const originalOnClose = () => this.onClose();
+      // Clean up observer on close.
+      // Capture the current onClose via bind() so the saved reference is not
+      // affected by the this.onClose reassignment below. Using an arrow fn
+      // (() => this.onClose()) here reads this.onClose lazily at call time,
+      // which after the reassignment resolves back to the wrapper itself and
+      // recurses until "Maximum call stack size exceeded".
+      const originalOnClose = this.onClose.bind(this);
       this.onClose = () => {
         observer.disconnect();
         originalOnClose();
