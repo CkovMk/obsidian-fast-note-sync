@@ -1,6 +1,6 @@
 import { TFolder, TFile, normalizePath } from "obsidian";
 
-import { receiveFileUpload, receiveFileSyncUpdate, receiveFileSyncDelete, receiveFileSyncMtime, receiveFileSyncChunkDownload, receiveFileSyncEnd, checkAndUploadAttachments, receiveFileSyncRename, receiveFileRenameAck, receiveFileUploadAck, receiveFileDeleteAck, isPluginUnloading } from "./operator_file";
+import { receiveFileUpload, receiveFileSyncUpdate, receiveFileSyncDelete, receiveFileSyncMtime, receiveFileSyncChunkDownload, receiveFileSyncEnd, checkAndUploadAttachments, receiveFileSyncRename, receiveFileRenameAck, receiveFileUploadAck, receiveFileDeleteAck, isPluginUnloading, reapStalledDownloads } from "./operator_file";
 import { hashContent, hashContentAsync, dump, isPathExcluded, isFolderSyncPathExcluded, configIsPathExcluded, getConfigSyncCustomDirs, generateUUID, showSyncNotice, isLargeBinarySyncRisk, describeBinarySyncLimit, hashFileAsync, formatFileSize, yieldToMain, getPluginDir } from "../utils/helpers";
 import { receiveConfigSyncModify, receiveConfigUpload, receiveConfigSyncMtime, receiveConfigSyncDelete, receiveConfigSyncEnd, configAllPaths, receiveConfigSyncClear, receiveConfigModifyAck, receiveConfigDeleteAck } from "./operator_config";
 import { receiveNoteSyncModify, receiveNoteUpload, receiveNoteSyncMtime, receiveNoteSyncDelete, receiveNoteSyncEnd, receiveNoteSyncRename, receiveNoteModifyAck, receiveNoteRenameAck, receiveNoteDeleteAck } from "./operator_note";
@@ -111,6 +111,10 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     }
     return;
   }
+
+  // Recover or fail stalled downloads so a stuck download can't hang the whole run.
+  void reapStalledDownloads(plugin);
+
   // 超时保底：调大为 300s 以支持超大库（多批次）的分批同步，防止误判超时终止
   // Safety timeout: increased to 300s to support large vaults with many batches, preventing false timeout termination
   const SYNC_TIMEOUT_MS = 300000;
@@ -142,11 +146,15 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     } else {
       plugin.updateStatusBar($("ui.status.completed"));
     }
+    // Clear leaked concurrency slots and stale download sessions so the next round starts clean.
+    plugin.concurrencyLimiter.clear();
+    plugin.fileDownloadSessions.clear();
     window.setTimeout(() => plugin.updateStatusBar(""), 10000);
     return;
   }
 
   const ws = plugin.websocket.ws;
+
   const bufferedAmount = ws && ws.readyState === WebSocket.OPEN ? ws.bufferedAmount : 0;
 
   // 模块进度的完成判定：使用新版基于 SyncPage 的 isTypeFullyDone 进行精确判断

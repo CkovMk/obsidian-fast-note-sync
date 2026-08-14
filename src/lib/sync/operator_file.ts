@@ -126,7 +126,59 @@ const failFileDownloadSession = async (plugin: FastSync, session: FileDownloadSe
   }
 }
 
+// Stalled-download recovery: a download session that never receives a chunk (or stops
+// advancing) would otherwise hold its shared concurrency slot forever and its owning page
+// would never ACK, hanging the whole sync. This reaper re-requests such sessions a few times,
+// then fails them cleanly so the run can finish. It never touches actively advancing sessions
+// (guarded by lastActivityAt), and the existing assembly-time all-chunks-present + exact-size
+// checks still protect against writing a corrupt or partial file.
+const DOWNLOAD_STALL_MS = 20000
+const DOWNLOAD_MAX_RETRIES = 3
+
+export const reapStalledDownloads = async function (plugin: FastSync) {
+  if (plugin.fileDownloadSessions.size === 0) return
+  const now = Date.now()
+  for (const [key, session] of Array.from(plugin.fileDownloadSessions.entries())) {
+    const last = session.lastActivityAt ?? 0
+    if (now - last < DOWNLOAD_STALL_MS) continue
+    const retries = session.downloadRetries ?? 0
+    if (retries < DOWNLOAD_MAX_RETRIES && session.pathHash) {
+      dumpError(`Download stalled for ${session.path} (retry ${retries + 1}/${DOWNLOAD_MAX_RETRIES}), re-requesting`)
+      releaseSessionMemory(session)
+      if (session.tempDir) await clearTempChunksDir(plugin, session.sessionId).catch(() => { /* ignore */ })
+      plugin.fileDownloadSessions.delete(key)
+      const tempKey = `temp_${session.path}`
+      const slotKey = session.initialSlotKey || `download_${session.path}`
+      plugin.fileDownloadSessions.set(tempKey, {
+        path: session.path,
+        contentHash: session.contentHash,
+        ctime: session.ctime,
+        mtime: session.mtime,
+        lastTime: session.lastTime,
+        sessionId: "",
+        totalChunks: 0,
+        size: session.size,
+        pageIndex: session.pageIndex,
+        initialSlotKey: slotKey,
+        lastActivityAt: Date.now(),
+        downloadRetries: retries + 1,
+        pathHash: session.pathHash,
+        ...createDownloadStorage(plugin, `init_${session.pathHash}`, session.size),
+      })
+      void plugin.websocket.SendMessage("FileChunkDownload", {
+        vault: plugin.settings.vault,
+        path: session.path,
+        pathHash: session.pathHash,
+      })
+    } else {
+      dumpError(`Download failed after retries, giving up (will retry next round): ${session.path}`)
+      await failFileDownloadSession(plugin, session, `Stalled: no progress for ${DOWNLOAD_STALL_MS}ms after ${DOWNLOAD_MAX_RETRIES} retries`)
+    }
+  }
+}
+
 const storeMemoryChunk = (session: FileDownloadSession, chunkIndex: number, chunkData: ArrayBuffer) => {
+
   if (!session.chunks) session.chunks = new Map<number, ArrayBuffer>()
   const existingChunk = session.chunks.get(chunkIndex)
   session.chunks.set(chunkIndex, chunkData)
@@ -783,6 +835,9 @@ export const receiveFileSyncUpdate = async function (data: ReceiveFileSyncUpdate
       size: data.size,
       pageIndex: data.pageIndex,
       initialSlotKey: slotKey,
+      lastActivityAt: Date.now(),
+      downloadRetries: 0,
+      pathHash: data.pathHash,
       ...createDownloadStorage(plugin, `init_${data.pathHash}`, data.size),
     }
     plugin.fileDownloadSessions.set(tempKey, tempSession)
@@ -973,6 +1028,9 @@ export const receiveFileSyncChunkDownload = async function (data: FileSyncChunkD
       size: data.size,
       pageIndex: tempSession.pageIndex,
       initialSlotKey: tempSession.initialSlotKey,
+      lastActivityAt: Date.now(),
+      downloadRetries: tempSession.downloadRetries ?? 0,
+      pathHash: tempSession.pathHash,
       ...createDownloadStorage(plugin, data.sessionId, data.size),
     }
     plugin.fileDownloadSessions.set(data.sessionId, session)
@@ -988,6 +1046,8 @@ export const receiveFileSyncChunkDownload = async function (data: FileSyncChunkD
       totalChunks: data.totalChunks,
       size: data.size,
       initialSlotKey: `download_${data.path}`,
+      lastActivityAt: Date.now(),
+      downloadRetries: 0,
       ...createDownloadStorage(plugin, data.sessionId, data.size),
     }
     plugin.fileDownloadSessions.set(data.sessionId, session)
@@ -1180,8 +1240,12 @@ export const handleFileChunkDownload = async function (buf: ArrayBuffer | Blob, 
       plugin.downloadedChunksCount++
     }
 
+    // Mark progress so the stalled-download reaper does not reap an actively advancing session.
+    session.lastActivityAt = Date.now()
+
     // 更新日志进度
     const completedCount = getCompletedDownloadChunks(session)
+
     SyncLogManager.getInstance().addOrUpdateLog({
       id: sessionId,
       type: 'receive',
