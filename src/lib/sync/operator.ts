@@ -1,6 +1,6 @@
 import { TFolder, TFile, normalizePath } from "obsidian";
 
-import { receiveFileUpload, receiveFileSyncUpdate, receiveFileSyncDelete, receiveFileSyncMtime, receiveFileSyncChunkDownload, receiveFileSyncEnd, checkAndUploadAttachments, receiveFileSyncRename, receiveFileRenameAck, receiveFileUploadAck, receiveFileDeleteAck, isPluginUnloading } from "./operator_file";
+import { receiveFileUpload, receiveFileSyncUpdate, receiveFileSyncDelete, receiveFileSyncMtime, receiveFileSyncChunkDownload, receiveFileSyncEnd, checkAndUploadAttachments, receiveFileSyncRename, receiveFileRenameAck, receiveFileUploadAck, receiveFileDeleteAck, isPluginUnloading, reapStalledDownloads } from "./operator_file";
 import { hashContent, hashContentAsync, dump, isPathExcluded, isFolderSyncPathExcluded, configIsPathExcluded, getConfigSyncCustomDirs, generateUUID, showSyncNotice, isLargeBinarySyncRisk, describeBinarySyncLimit, hashFileAsync, formatFileSize, yieldToMain, getPluginDir } from "../utils/helpers";
 import { receiveConfigSyncModify, receiveConfigUpload, receiveConfigSyncMtime, receiveConfigSyncDelete, receiveConfigSyncEnd, configAllPaths, receiveConfigSyncClear, receiveConfigModifyAck, receiveConfigDeleteAck } from "./operator_config";
 import { receiveNoteSyncModify, receiveNoteUpload, receiveNoteSyncMtime, receiveNoteSyncDelete, receiveNoteSyncEnd, receiveNoteSyncRename, receiveNoteModifyAck, receiveNoteRenameAck, receiveNoteDeleteAck } from "./operator_note";
@@ -114,7 +114,68 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, _sync
   // Completion is determined by acknowledgements, never total elapsed time.
   // Large vaults can keep making progress for hours; request and connection
   // failures retain their own timeout/cleanup paths.
+
+  // Recover or fail stalled downloads so a stuck download can't hang the whole run.
+  void reapStalledDownloads(plugin);
+
+  // 超时保底：基于"无进展时长"而非固定墙钟时长，避免长时间但仍在稳定传输的大文件被误杀。
+  // 每当观察到真实传输进展（下载/上传分片、完成任务数变化）就把无进展计时器归零；
+  // 只有连续 SYNC_STALL_TIMEOUT_MS 都没有任何进展，才判定为真正卡死并复位本轮。
+  // Safety timeout based on "time since last progress" instead of a fixed wall-clock deadline, so a
+  // slow-but-steady large-file transfer is not falsely killed. Any real transfer progress (a chunk
+  // downloaded/uploaded, or the completed-task count changing) resets the no-progress timer; only
+  // SYNC_STALL_TIMEOUT_MS of continuous no-progress is treated as a genuine hang and resets the round.
+  const SYNC_STALL_TIMEOUT_MS = 300000;
+  const progressSignature = plugin.downloadedChunksCount + plugin.uploadedChunksCount
+    + plugin.downloadedFilesCount + plugin.syncState.getCompletedTasks();
+  const now = Date.now();
+  if (plugin.syncState.lastProgressSignature !== progressSignature) {
+    // 有新进展：更新快照并把无进展计时器归零 / Progress observed: snapshot it and reset the stall timer
+    plugin.syncState.lastProgressSignature = progressSignature;
+    plugin.syncState.lastProgressAt = now;
+  } else if (plugin.syncState.lastProgressAt === 0) {
+    // 首次进入且尚无进展：以本轮开始时间作为无进展计时起点 / First entry with no progress yet: seed from sync start
+    plugin.syncState.lastProgressAt = _syncStartTime || now;
+  }
+  if (plugin.syncState.lastProgressAt && now - plugin.syncState.lastProgressAt > SYNC_STALL_TIMEOUT_MS) {
+
+    if (intervalId) {
+      window.clearInterval(intervalId);
+      if (plugin.syncState.progressCheckIntervalId === intervalId) {
+        plugin.syncState.progressCheckIntervalId = null;
+      }
+    }
+    dump(`Sync completion timeout: no transfer progress for ${SYNC_STALL_TIMEOUT_MS}ms. Tasks: note=${JSON.stringify(plugin.noteSyncTasks)}, file=${JSON.stringify(plugin.fileSyncTasks)}, folder=${JSON.stringify(plugin.folderSyncTasks)}, config=${JSON.stringify(plugin.configSyncTasks)}`)
+
+    plugin.syncState.activeSyncContext = null; // 同步超时，清空活跃的上下文 / Sync timeout, reset the active context
+    plugin.syncTypeCompleteCount = 0;
+    plugin.resetSyncTasks();
+    plugin.syncPageStateMap.clear(); // 清空残留的页状态 / Clear stale page state map
+    plugin.totalFilesToDownload = 0;
+    plugin.downloadedFilesCount = 0;
+    plugin.totalChunksToDownload = 0;
+    plugin.downloadedChunksCount = 0;
+    plugin.totalChunksToUpload = 0;
+    plugin.uploadedChunksCount = 0;
+    plugin.progressTracker.forceComplete();
+    // 超时保底不代表真正完成：仍有下载会话未结束时，如实提示"部分未完成"，而非静默上报成功
+    // A safety timeout does not mean genuine completion: if download sessions are still pending,
+    // surface "partially incomplete" instead of silently reporting success
+    if (plugin.fileDownloadSessions.size > 0) {
+      dump(`Sync completion timeout with ${plugin.fileDownloadSessions.size} unfinished file download session(s), reporting partial completion.`);
+      plugin.updateStatusBar($("ui.status.timeout_partial"));
+    } else {
+      plugin.updateStatusBar($("ui.status.completed"));
+    }
+    // Clear leaked concurrency slots and stale download sessions so the next round starts clean.
+    plugin.concurrencyLimiter.clear();
+    plugin.fileDownloadSessions.clear();
+    window.setTimeout(() => plugin.updateStatusBar(""), 10000);
+    return;
+  }
+
   const ws = plugin.websocket.ws;
+
   const bufferedAmount = ws && ws.readyState === WebSocket.OPEN ? ws.bufferedAmount : 0;
 
   // 模块进度的完成判定：使用新版基于 SyncPage 的 isTypeFullyDone 进行精确判断
@@ -610,6 +671,11 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
     plugin.downloadedChunksCount = 0;
     plugin.totalChunksToUpload = 0;
     plugin.uploadedChunksCount = 0;
+    // 复位进度感知超时的跟踪字段，避免上一轮的陈旧签名/时间戳导致新一轮立即误判超时
+    // Reset progress-aware timeout tracking so a stale signature/timestamp from the previous round
+    // cannot trip an immediate false timeout at the start of this round.
+    plugin.syncState.lastProgressSignature = -1;
+    plugin.syncState.lastProgressAt = 0;
     // 清空上一次连接的未完成 rename 队列，由 hashManager 旧路径进 delFiles 自然处理
     // Clear pending renames from previous connection; old paths in hashManager will naturally go into delFiles
     plugin.pendingFileRenames = []

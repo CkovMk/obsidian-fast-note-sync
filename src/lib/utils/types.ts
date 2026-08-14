@@ -104,6 +104,13 @@ export interface FileDownloadSession {
     /** 所属下载页（0-based），从 receiveFileSyncUpdate 的 pageIndex 透传，供分片下载会话完成时归账（见 ReceiveMessage.pageIndex 注释） */
     pageIndex?: number;
     initialSlotKey?: string;
+    // Last time this session made progress (session created or a chunk received),
+    // used by the stalled-download reaper to detect downloads that never advance.
+    lastActivityAt?: number;
+    // How many times this download has been re-requested by the reaper.
+    downloadRetries?: number;
+    // Server path hash, stored so the reaper can re-request the download without recomputing it.
+    pathHash?: string;
 }
 
 export interface ReceiveMtimeMessage {

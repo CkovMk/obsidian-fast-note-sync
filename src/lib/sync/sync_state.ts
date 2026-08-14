@@ -141,6 +141,15 @@ export class SyncState {
   uploadedChunksCount = 0;    // 已上传分片计数 / Uploaded chunks count
   lastStatusBarPercentage = 0; // 上次状态栏进度百分比 / Last status bar percentage
 
+  // ─── Progress-aware timeout tracking ─────────────────────────────────────────
+  // The global sync timeout is reset whenever real transfer progress is observed (a chunk is
+  // downloaded/uploaded or a task completes), so a slow-but-steady large-file transfer is not
+  // killed by a fixed wall-clock deadline. lastProgressSignature is a monotonic snapshot of all
+  // progress counters; lastProgressAt is the timestamp of the last observed change.
+  lastProgressSignature = -1;
+  lastProgressAt = 0;
+
+
   // ─── Per-type sync-end flags ─────────────────────────────────────────────────
   noteSyncEnd = false;    // 笔记同步是否完成 / Note sync completed
   fileSyncEnd = false;    // 文件同步是否完成 / File sync completed
