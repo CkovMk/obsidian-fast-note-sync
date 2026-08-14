@@ -95,17 +95,35 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
   // Recover or fail stalled downloads so a stuck download can't hang the whole run.
   void reapStalledDownloads(plugin);
 
-  // 超时保底：调大为 300s 以支持超大库（多批次）的分批同步，防止误判超时终止
-  // Safety timeout: increased to 300s to support large vaults with many batches, preventing false timeout termination
-  const SYNC_TIMEOUT_MS = 300000;
-  if (syncStartTime && Date.now() - syncStartTime > SYNC_TIMEOUT_MS) {
+  // 超时保底：基于"无进展时长"而非固定墙钟时长，避免长时间但仍在稳定传输的大文件被误杀。
+  // 每当观察到真实传输进展（下载/上传分片、完成任务数变化）就把无进展计时器归零；
+  // 只有连续 SYNC_STALL_TIMEOUT_MS 都没有任何进展，才判定为真正卡死并复位本轮。
+  // Safety timeout based on "time since last progress" instead of a fixed wall-clock deadline, so a
+  // slow-but-steady large-file transfer is not falsely killed. Any real transfer progress (a chunk
+  // downloaded/uploaded, or the completed-task count changing) resets the no-progress timer; only
+  // SYNC_STALL_TIMEOUT_MS of continuous no-progress is treated as a genuine hang and resets the round.
+  const SYNC_STALL_TIMEOUT_MS = 300000;
+  const progressSignature = plugin.downloadedChunksCount + plugin.uploadedChunksCount
+    + plugin.downloadedFilesCount + plugin.syncState.getCompletedTasks();
+  const now = Date.now();
+  if (plugin.syncState.lastProgressSignature !== progressSignature) {
+    // 有新进展：更新快照并把无进展计时器归零 / Progress observed: snapshot it and reset the stall timer
+    plugin.syncState.lastProgressSignature = progressSignature;
+    plugin.syncState.lastProgressAt = now;
+  } else if (plugin.syncState.lastProgressAt === 0) {
+    // 首次进入且尚无进展：以本轮开始时间作为无进展计时起点 / First entry with no progress yet: seed from sync start
+    plugin.syncState.lastProgressAt = syncStartTime || now;
+  }
+  if (plugin.syncState.lastProgressAt && now - plugin.syncState.lastProgressAt > SYNC_STALL_TIMEOUT_MS) {
+
     if (intervalId) {
       window.clearInterval(intervalId);
       if (plugin.syncState.progressCheckIntervalId === intervalId) {
         plugin.syncState.progressCheckIntervalId = null;
       }
     }
-    dump(`Sync completion timeout after ${SYNC_TIMEOUT_MS}ms. Tasks: note=${JSON.stringify(plugin.noteSyncTasks)}, file=${JSON.stringify(plugin.fileSyncTasks)}, folder=${JSON.stringify(plugin.folderSyncTasks)}, config=${JSON.stringify(plugin.configSyncTasks)}`)
+    dump(`Sync completion timeout: no transfer progress for ${SYNC_STALL_TIMEOUT_MS}ms. Tasks: note=${JSON.stringify(plugin.noteSyncTasks)}, file=${JSON.stringify(plugin.fileSyncTasks)}, folder=${JSON.stringify(plugin.folderSyncTasks)}, config=${JSON.stringify(plugin.configSyncTasks)}`)
+
     plugin.syncState.activeSyncContext = null; // 同步超时，清空活跃的上下文 / Sync timeout, reset the active context
     plugin.syncTypeCompleteCount = 0;
     plugin.resetSyncTasks();
@@ -638,6 +656,11 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
     plugin.downloadedChunksCount = 0;
     plugin.totalChunksToUpload = 0;
     plugin.uploadedChunksCount = 0;
+    // 复位进度感知超时的跟踪字段，避免上一轮的陈旧签名/时间戳导致新一轮立即误判超时
+    // Reset progress-aware timeout tracking so a stale signature/timestamp from the previous round
+    // cannot trip an immediate false timeout at the start of this round.
+    plugin.syncState.lastProgressSignature = -1;
+    plugin.syncState.lastProgressAt = 0;
     // 清空上一次连接的未完成 rename 队列，由 hashManager 旧路径进 delFiles 自然处理
     // Clear pending renames from previous connection; old paths in hashManager will naturally go into delFiles
     plugin.pendingFileRenames = []
