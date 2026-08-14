@@ -70,6 +70,26 @@ export const clearAllHashes = async (plugin: FastSync) => {
   plugin.configHashManager.clearAll();
 };
 
+type ScannedHashMap = Map<string, { hash: string; mtime: number; size: number }>;
+
+/**
+ * 提交扫描期算出的哈希，并只移除本次已提交的条目。
+ * scannedXxxHashes 是挂在 syncState 上的全局表，整表 clear 会连带清掉另一轮
+ * 并发扫描刚算出、还没落盘的哈希，导致这些文件的哈希白算、下次同步继续重算。
+ *
+ * Commit hashes computed during the scan, removing only the entries just committed.
+ * The scanned maps live on syncState (global), so clearing the whole map would also
+ * discard hashes a concurrent scan just computed but not yet persisted.
+ */
+function commitScannedHashes(scanned: ScannedHashMap, commit: (m: ScannedHashMap) => void): void {
+  if (scanned.size === 0) return;
+  const committed: ScannedHashMap = new Map(scanned);
+  commit(committed);
+  for (const path of committed.keys()) {
+    scanned.delete(path);
+  }
+}
+
 
 
 /**
@@ -454,10 +474,7 @@ async function receiveSyncEndWrapper(data: unknown, plugin: FastSync, type: "not
     plugin.pendingNoteModifies.clear()
     plugin.localStorageManager.clearPending('pendingNoteModifies')
     // 同步结束，提交扫描阶段计算出的哈希 (Commit hashes calculated during scan)
-    if (plugin.scannedNoteHashes.size > 0) {
-      plugin.fileHashManager.bulkSetFromScanned(plugin.scannedNoteHashes);
-      plugin.scannedNoteHashes.clear();
-    }
+    commitScannedHashes(plugin.scannedNoteHashes, (m) => plugin.fileHashManager.bulkSetFromScanned(m));
     // 同步结束，强制落盘本轮防抖累积的哈希写入
     plugin.fileHashManager.flush();
   } else if (type === "file") {
@@ -468,10 +485,7 @@ async function receiveSyncEndWrapper(data: unknown, plugin: FastSync, type: "not
     plugin.pendingUploadHashes.clear()
     plugin.localStorageManager.clearPending('pendingUploadHashes')
     // 同步结束，提交扫描阶段计算出的哈希 (Commit hashes calculated during scan)
-    if (plugin.scannedFileHashes.size > 0) {
-      plugin.fileHashManager.bulkSetFromScanned(plugin.scannedFileHashes);
-      plugin.scannedFileHashes.clear();
-    }
+    commitScannedHashes(plugin.scannedFileHashes, (m) => plugin.fileHashManager.bulkSetFromScanned(m));
     // 同步结束，强制落盘本轮防抖累积的哈希写入
     plugin.fileHashManager.flush();
   } else if (type === "folder") {
@@ -497,10 +511,7 @@ async function receiveSyncEndWrapper(data: unknown, plugin: FastSync, type: "not
     plugin.pendingConfigModifies.clear()
     plugin.localStorageManager.clearPending('pendingConfigModifies')
     // 同步结束，提交扫描阶段计算出的哈希 (Commit hashes calculated during scan)
-    if (plugin.scannedConfigHashes.size > 0) {
-      plugin.configHashManager.bulkSetFromScanned(plugin.scannedConfigHashes);
-      plugin.scannedConfigHashes.clear();
-    }
+    commitScannedHashes(plugin.scannedConfigHashes, (m) => plugin.configHashManager.bulkSetFromScanned(m));
     // 同步结束，强制落盘本轮防抖累积的哈希写入
     plugin.configHashManager.flush();
   }
@@ -899,14 +910,8 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
       }
 
       // Persist any newly computed hashes (breaks the Catch-22)
-      if (plugin.scannedNoteHashes.size > 0) {
-        plugin.fileHashManager.bulkSetFromScanned(plugin.scannedNoteHashes);
-        plugin.scannedNoteHashes.clear();
-      }
-      if (plugin.scannedFileHashes.size > 0) {
-        plugin.fileHashManager.bulkSetFromScanned(plugin.scannedFileHashes);
-        plugin.scannedFileHashes.clear();
-      }
+      commitScannedHashes(plugin.scannedNoteHashes, (m) => plugin.fileHashManager.bulkSetFromScanned(m));
+      commitScannedHashes(plugin.scannedFileHashes, (m) => plugin.fileHashManager.bulkSetFromScanned(m));
       dump(`[ScanPerf] Scan done: ${hashComputeCount}/${MAX_HASH_PER_CYCLE} hashes computed, notes=${notes.length}, files=${files.length}, folders=${folders.length}`);
 
       // 检测被删除的文件 (对比哈希表和本地 Vault)

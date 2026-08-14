@@ -240,9 +240,13 @@ export class SyncState {
     this.configSyncEnd = false;
     this.folderSyncEnd = false;
     this.offlineGuardSkippedThisRound = false;
-    this.scannedNoteHashes.clear();
-    this.scannedFileHashes.clear();
-    this.scannedConfigHashes.clear();
+    // 注意：不再清空 scannedXxxHashes。这些哈希是扫描期实打实算出来的，条目自带 mtime/size 校验，
+    // 留到下一轮同步结束时提交依然有效；在这里清空会把上一轮（可能仍在收尾）算出的哈希白白丢掉，
+    // 导致同一批文件每次同步都要重算。提交由 operator.ts 的 commitScannedHashes 按键移除。
+    // Note: scannedXxxHashes are intentionally NOT cleared here. They are real computed hashes
+    // carrying their own mtime/size for validation, so they stay valid for the next commit.
+    // Clearing them here threw away work from a round that was still finishing, forcing the same
+    // files to be re-hashed on every sync. Entries are removed per-key by commitScannedHashes.
   }
 
   /**
