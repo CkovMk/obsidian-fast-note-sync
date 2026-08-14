@@ -16,6 +16,7 @@ export class EventManager {
   //保存待处理的重命名文件的路径，用于跳过同时触发的 modify 事件
   private pendingRenamePaths: Set<string> = new Set()
   private blurTimer: number | null = null
+  private resumeTimer: number | null = null
 
   constructor(plugin: FastSync) {
     this.plugin = plugin
@@ -72,6 +73,28 @@ export class EventManager {
       window.clearTimeout(this.blurTimer)
       this.blurTimer = null
     }
+    if (this.resumeTimer) {
+      window.clearTimeout(this.resumeTimer)
+      this.resumeTimer = null
+    }
+  }
+
+  /**
+   * 回到前台后的重连：focus 与 visibilitychange 通常会连着各触发一次，
+   * 这里做 1s 去抖并只在连接确实断开时才重连，避免一次切前台触发两轮同步。
+   * Foreground resume reconnect: focus and visibilitychange usually both fire, so debounce
+   * for 1s and only reconnect when the socket is actually down — one resume, one sync.
+   */
+  private scheduleResumeReconnect(source: string) {
+    if (this.resumeTimer) window.clearTimeout(this.resumeTimer)
+    this.resumeTimer = window.setTimeout(() => {
+      this.resumeTimer = null
+      if (this.plugin.websocket?.isConnected()) {
+        dump(`Resume reconnect skipped (${source}): connection still alive`)
+        return
+      }
+      this.plugin.websocket?.triggerReconnect()
+    }, 1000)
   }
 
   private onOnline = () => {
@@ -97,9 +120,9 @@ export class EventManager {
         dump("Obsidian Mobile Focus (Timer cancelled)")
       }
       dump("Obsidian Mobile Plugin Focus")
-      // 回到前台立即重置退避计数器并重连
-      // Reset backoff counter and reconnect immediately when returning to foreground
-      this.plugin.websocket?.triggerReconnect()
+      // 回到前台重置退避计数器并重连（与 visibilitychange 合并去抖）
+      // Reset backoff counter and reconnect on foreground (debounced with visibilitychange)
+      this.scheduleResumeReconnect("focus")
     }
   }
 
@@ -125,9 +148,9 @@ export class EventManager {
         this.plugin.websocket?.unRegister()
       }
     } else {
-      // 恢复可见时立即重置退避计数器并重连
-      // Reset backoff counter and reconnect immediately when becoming visible again
-      this.plugin.websocket?.triggerReconnect()
+      // 恢复可见时重置退避计数器并重连（与 focus 合并去抖）
+      // Reset backoff counter and reconnect when visible again (debounced with focus)
+      this.scheduleResumeReconnect("visibilitychange")
       // 恢复前台时刷新分享状态（覆盖短暂后台期间其他设备变更分享的场景）
       // Refresh share state on foreground resume (covers share changes by other devices during brief background)
       void this.plugin.shareIndicatorManager?.syncWithServer()
