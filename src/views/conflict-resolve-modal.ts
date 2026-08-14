@@ -441,17 +441,21 @@ export class ConflictResolveModal extends Modal {
     // Button group // 按钮组
     const btnGroup = header.createDiv({ cls: "col-btn-group" });
 
-    const fullContent = diffLines
-      .filter(l => l.type !== "delete")
-      .map(l => l.text)
-      .join("\n");
-    const copyBtn = btnGroup.createEl("button", { text: $("ui.history.copy") || "复制" });
-    copyBtn.onClickEvent(() => {
-      void navigator.clipboard.writeText(fullContent).then(() => {
-        copyBtn.setText($("ui.history.copied") || "已复制");
-        window.setTimeout(() => copyBtn.setText($("ui.history.copy") || "复制"), 2000);
+    // Copy button only when there is a per-line diff to copy
+    // 仅当存在逐行差异内容时才提供复制按钮（大文件跳过 diff 时不渲染）
+    if (diffLines.length > 0) {
+      const fullContent = diffLines
+        .filter(l => l.type !== "delete")
+        .map(l => l.text)
+        .join("\n");
+      const copyBtn = btnGroup.createEl("button", { text: $("ui.history.copy") || "复制" });
+      copyBtn.onClickEvent(() => {
+        void navigator.clipboard.writeText(fullContent).then(() => {
+          copyBtn.setText($("ui.history.copied") || "已复制");
+          window.setTimeout(() => copyBtn.setText($("ui.history.copy") || "复制"), 2000);
+        });
       });
-    });
+    }
 
     // Action button if provided // 如果提供了自定义动作按钮（如“使用本地”/“使用云端”）则渲染它
     if (actionText && actionCallback) {
@@ -463,6 +467,18 @@ export class ConflictResolveModal extends Modal {
 
     // Diff content area // 差异内容展示区
     const content = col.createDiv({ cls: "conflict-diff-content" });
+
+    // Large-file fallback: diff was skipped in computeDiffLines, show a hint
+    // instead of per-line rendering to keep the modal responsive.
+    // 大文件降级：computeDiffLines 已跳过差异计算，这里改为显示提示，避免逐行渲染卡死。
+    if (diffLines.length === 0) {
+      content.createDiv({
+        cls: "conflict-diff-skipped",
+        text: $("ui.conflict.diff_skipped") ||
+          "文件较大，已跳过逐行差异对比。可点击上方按钮选用本地/远端版本，或在右侧编辑器直接编辑。"
+      });
+      return content;
+    }
 
     // Render each diff line // 渲染每一行差异
     diffLines.forEach(line => {
@@ -604,8 +620,13 @@ export class ConflictResolveModal extends Modal {
       });
       observer.observe(textarea);
 
-      // Clean up observer on close
-      const originalOnClose = () => this.onClose();
+      // Clean up observer on close.
+      // Capture the current onClose via bind() so the saved reference is not
+      // affected by the this.onClose reassignment below. Using an arrow fn
+      // (() => this.onClose()) here reads this.onClose lazily at call time,
+      // which after the reassignment resolves back to the wrapper itself and
+      // recurses until "Maximum call stack size exceeded".
+      const originalOnClose = this.onClose.bind(this);
       this.onClose = () => {
         observer.disconnect();
         originalOnClose();
@@ -663,6 +684,23 @@ function computeDiffLines(oldText: string, newText: string): DiffLine[] {
   const newLines = newText.split(/\r?\n/);
   const M = oldLines.length;
   const N = newLines.length;
+
+  // Performance guard: the LCS DP below is O(M*N) in both time and space and
+  // runs synchronously on the UI thread. For large attachments (e.g. big
+  // drawio diagrams or JSON dumps) this freezes the modal for a long time and
+  // can exhaust memory. When the input exceeds a safe threshold, skip the diff
+  // and return an empty array; createDiffColumn then renders a hint instead of
+  // per-line rendering, and the user can still pick "use local" / "use remote"
+  // or edit manually.
+  // 性能保护：下方的 LCS 动态规划为 O(M*N) 时间与空间复杂度，且在 UI 线程同步执行。
+  // 对大型附件（如较大的 drawio 图、JSON 导出）会长时间卡住弹窗甚至耗尽内存。
+  // 当输入超过安全阈值时跳过差异计算并返回空数组，createDiffColumn 会改为渲染提示，
+  // 用户仍可「使用本地/使用远端」或手动编辑来解决冲突。
+  const MAX_LINES_PER_SIDE = 4000;
+  const MAX_DP_CELLS = 1_000_000;
+  if (M > MAX_LINES_PER_SIDE || N > MAX_LINES_PER_SIDE || M * N > MAX_DP_CELLS) {
+    return [];
+  }
 
   // Build LCS dynamic-programming table // 构建 LCS 动态规划表
   const dp: number[][] = Array.from({ length: M + 1 }, () => new Array<number>(N + 1).fill(0));
