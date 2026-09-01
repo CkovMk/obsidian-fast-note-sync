@@ -561,6 +561,7 @@ export default {
   "ui.conflict.delete_conflict_copy": "동결 충돌 사본 삭제",
   "ui.conflict.original_missing": "원본 파일이 존재하지 않거나 삭제되었을 수 있습니다",
   "ui.conflict.diff_too_large": "파일이 너무 커서 차이를 생성할 수 없습니다. '나란히 보기'를 사용하여 수동으로 비교하세요",
+  "ui.conflict.diff_skipped": "파일이 커서 줄 단위 차이 비교를 건너뛰었습니다. 위의 버튼으로 로컬/원격 버전을 선택하거나 오른쪽 편집기에서 직접 편집할 수 있습니다.",
   "ui.conflict.action_failed": "충돌 해결 실패, 다시 시도하세요",
   "ui.conflict.resolved_notice": "충돌이 해결되었습니다",
   "ui.conflict.local_title": "로컬 버전",
