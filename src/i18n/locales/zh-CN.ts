@@ -561,6 +561,7 @@ export default {
   "ui.conflict.delete_conflict_copy": "删除冲突副本",
   "ui.conflict.original_missing": "原文件不存在，可能已被删除",
   "ui.conflict.diff_too_large": "文件过大，无法生成差异，请使用“并排查看”手动比对",
+  "ui.conflict.diff_skipped": "文件较大，已跳过逐行差异对比。可点击上方按钮选用本地/远端版本，或在右侧编辑器直接编辑。",
   "ui.conflict.action_failed": "处理冲突失败，请重试",
   "ui.conflict.resolved_notice": "冲突已解决",
   "ui.conflict.local_title": "本地版本",

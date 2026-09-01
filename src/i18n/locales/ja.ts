@@ -561,6 +561,7 @@ export default {
   "ui.conflict.delete_conflict_copy": "競合コピーを削除",
   "ui.conflict.original_missing": "元のファイルが存在しません。削除された可能性があります",
   "ui.conflict.diff_too_large": "ファイルが大きすぎるため、差分を生成できません。「並べて表示」を使用して手動で比較してください",
+  "ui.conflict.diff_skipped": "ファイルが大きいため、行単位の差分比較をスキップしました。上のボタンでローカル/リモート版を選ぶか、右側のエディターで直接編集できます。",
   "ui.conflict.action_failed": "競合の処理に失敗しました。再試行してください",
   "ui.conflict.resolved_notice": "競合は解決済みです",
   "ui.conflict.local_title": "ローカル版",

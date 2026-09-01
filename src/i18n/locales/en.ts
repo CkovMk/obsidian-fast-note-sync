@@ -561,6 +561,7 @@ export default {
   "ui.conflict.delete_conflict_copy": "Delete Conflict Copy",
   "ui.conflict.original_missing": "Original file does not exist; it may have been deleted",
   "ui.conflict.diff_too_large": "File is too large to generate a diff. Please use 'View Side by Side' for manual comparison",
+  "ui.conflict.diff_skipped": "This file is large, so line-by-line diff has been skipped. Use the buttons above to pick the local/remote version, or edit directly in the editor on the right.",
   "ui.conflict.action_failed": "Failed to resolve conflict. Please try again",
   "ui.conflict.resolved_notice": "Conflict resolved",
   "ui.conflict.local_title": "Local Version",
