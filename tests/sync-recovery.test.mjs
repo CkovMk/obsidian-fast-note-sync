@@ -28,13 +28,17 @@ const { ConcurrencyLimiter } = load('src/lib/sync/concurrency_limiter.ts');
   const statuses = [];
   const fail = () => { throw new Error('unfinished sync must not be reset or completed'); };
   const { checkSyncCompletion } = load('src/lib/sync/operator.ts', {
-    '../../i18n/lang': { $: key => key }
+    '../../i18n/lang': { $: key => key },
+    // The rebased no-progress watchdog calls the stalled-download reaper on every tick.
+    './operator_file': { reapStalledDownloads: async () => {} }
   }, { WebSocket: { OPEN: 1 } });
   const p = {
-    syncState: { activeSyncContext: 'long-running' }, isSyncing: true,
+    syncState: { activeSyncContext: 'long-running', lastProgressSignature: -1, lastProgressAt: 0,
+      getCompletedTasks: () => 0 }, isSyncing: true,
     settings: { syncEnabled: true, configSyncEnabled: true },
     websocket: { ws: { readyState: 1, bufferedAmount: 0 } },
     fileDownloadSessions: new Map(),
+    downloadedChunksCount: 0, uploadedChunksCount: 0, downloadedFilesCount: 0,
     progressTracker: { isTypeFullyDone: () => false, getOverallPct: () => 100,
       getDetailText: () => 'pending uploads', forceComplete: fail },
     resetSyncTasks: fail,
