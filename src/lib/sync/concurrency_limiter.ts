@@ -1,5 +1,5 @@
 import type FastSync from "../../main";
-import { dump } from "../utils/helpers";
+import { dump, nfc } from "../utils/helpers";
 
 /**
  * 并发管理器
@@ -27,6 +27,9 @@ export class ConcurrencyLimiter {
         if (!this.plugin.settings.concurrencyControlEnabled) {
             return true;
         }
+
+        // 键统一 NFC 规范化，保证同一文件的获取/释放在 NFD/NFC 两种来源下命中同一槽位（见 nfc() 注释）
+        key = nfc(key);
 
         // FileUploadCheck hands its existing slot to FileUpload.
         if (this.activeKeys.has(key)) return true;
@@ -64,6 +67,9 @@ export class ConcurrencyLimiter {
         if (!this.plugin.settings.concurrencyControlEnabled) {
             return;
         }
+
+        // 与 waitForSlot 保持一致：键先 NFC 规范化再查找（见 nfc() 注释）
+        key = nfc(key);
 
         if (this.activeKeys.has(key)) {
             this.activeKeys.delete(key);

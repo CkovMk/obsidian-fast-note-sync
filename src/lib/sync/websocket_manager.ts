@@ -1,7 +1,7 @@
 import { moment, Platform, normalizePath } from "obsidian";
 
 import { invalidateFileDownloads, handleFileChunkDownload, BINARY_PREFIX_FILE_SYNC, clearUploadQueue, receiveFileUploadSessionNotFound } from "./operator_file";
-import { dump, addRandomParam, showSyncNotice, safeStringify, getPluginDir, hashContent } from "../utils/helpers";
+import { dump, addRandomParam, showSyncNotice, safeStringify, getPluginDir, hashContent, nfc } from "../utils/helpers";
 import { enSendDTOToProtobuf, deReceivePacket } from "../../pb/protobuf_mapper";
 import { receiveOperators, startupSync, startupFullSync, settleAllBatchSendSessionsOnClose } from "./operator";
 import { SyncLogManager } from "./sync_log_manager";
@@ -390,9 +390,11 @@ export class WebSocketManager {
           path = payloadData.path ?? payloadData.Path;
         }
         if (typeof path === "string") {
-          this.plugin.concurrencyLimiter.releaseSlot(path);
-          const pageIndex = this.plugin.syncState.pendingNotePushPageIndex.get(path);
-          this.plugin.syncState.pendingNotePushPageIndex.delete(path);
+          // 槽位/页索引键为 NFC 形式（见 nfc() 注释）
+          const p = nfc(path);
+          this.plugin.concurrencyLimiter.releaseSlot(p);
+          const pageIndex = this.plugin.syncState.pendingNotePushPageIndex.get(p);
+          this.plugin.syncState.pendingNotePushPageIndex.delete(p);
           this.plugin.recordSyncCompleted('note', pageIndex);
         }
       } else if (data.code === 463 && typeof data.data?.sessionID === "string") {
@@ -426,7 +428,8 @@ export class WebSocketManager {
         // Only admit a contextless response for a pending upload in this client.
         const isPendingMtimeAck = msgAction === WSAction.NoteSyncMtime && !data.context
           && typeof data.data?.path === 'string'
-          && this.plugin.pendingNoteModifies.has(data.data.path);
+          // pendingNoteModifies 的键为 NFC 形式，入站路径需同形比较（见 nfc() 注释）
+          && this.plugin.pendingNoteModifies.has(nfc(data.data.path));
         if (!isControlMsg && !isPendingMtimeAck && data.context !== this.plugin.syncState.activeSyncContext) {
           dump(`[SyncContext] Discard message ${msgAction} due to mismatched context. Expected: ${this.plugin.syncState.activeSyncContext}, Got: ${data.context}`);
           return;
@@ -450,6 +453,12 @@ export class WebSocketManager {
           const merged = { ...data.data };
           if (data.context) merged.context = data.context;
           if (pageIndex !== undefined) merged.pageIndex = pageIndex;
+          // 入站路径统一 NFC 规范化（见 nfc() 注释）：服务端存储的 NFD 遗留记录
+          // （iPad 旧版上传产生）在此被规范化为 NFC，使下载/删除/重命名等处理器
+          // 用与本地键一致的形式做查找，避免同一视觉路径产生重复文件。
+          for (const k of ['path', 'oldPath', 'newPath']) {
+            if (typeof merged[k] === 'string') merged[k] = nfc(merged[k]);
+          }
           payload = merged;
         }
         this.receivedFileDetails ??= new Set<string>();
@@ -595,7 +604,8 @@ export class WebSocketManager {
     if (payloadData && typeof payloadData === "object") {
       const rawPath = payloadData.path ?? payloadData.Path;
       if (typeof rawPath === "string") {
-        path = normalizePath(rawPath);
+        // 冲突路径同样 NFC 规范化，保证后续本地查找与键比较形式一致（见 nfc() 注释）
+        path = nfc(normalizePath(rawPath));
       }
       const rawServerContent = payloadData.serverContent ?? payloadData.ServerContent;
       if (typeof rawServerContent === "string") {

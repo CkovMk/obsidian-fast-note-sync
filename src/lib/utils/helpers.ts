@@ -421,6 +421,63 @@ export const hashContent = function (content: string): string {
 }
 
 /**
+ * Unicode NFC 规范化（仅用于同步路径字符串）。
+ * iOS/macOS 文件系统常用 NFD（分解式）文件名，而 Linux/桌面端为 NFC（组合式），
+ * 同一视觉路径在两端 charCodeAt 序列不同 → pathHash 不同 → 服务端视为两个文件，
+ * 导致 iPad 上同一批附件每轮同步被反复要求上传。所有进入同步协议的路径字符串
+ * （path/oldPath/newPath 及其 pathHash）统一先经 nfc() 规范化，保证跨端一致。
+ * NFC normalization for sync path strings only. iOS/macOS file systems commonly use
+ * NFD (decomposed) names while Linux/desktop use NFC (composed); the same visual path
+ * then yields different charCodeAt sequences → different pathHash → the server treats
+ * them as two files, causing the iPad to re-upload the same batch every sync round.
+ * Every path string entering the sync protocol is canonicalized through nfc() first.
+ */
+// 替换孤立代理项（unpaired surrogate）为 U+FFFD。
+// JS 字符串可以包含不成对的代理项（如来自某些文件系统/导入工具的文件名），
+// 而 protobuf 等编码器会将其按 CESU-8 写成 3 字节序列 —— 那是**非法 UTF-8**。
+// 服务端收到后存入 DB，之后任何包含该记录的消息在 protobuf 编码时都会失败
+// （"string field contains invalid UTF-8"），并触发 gws 的严格 UTF-8 文本校验
+// 直接断开连接 → 同步轮次永远无法完成（lastTime 不前进）→ 死循环。
+// Replace unpaired surrogates with U+FFFD. JS strings may contain lone surrogates
+// (e.g. from certain file-system/imported file names); encoders like protobuf emit
+// them as CESU-8 3-byte sequences, which are INVALID UTF-8. The server stores such
+// bytes in the DB and then every response containing that record fails protobuf
+// encoding ("string field contains invalid UTF-8"), tripping gws's strict UTF-8
+// text check and killing the connection → the round can never complete (lastTime
+// never advances) → infinite reconnect loop.
+const replaceUnpairedSurrogates = function (s: string): string {
+  if (!s) return s
+  let out = ""
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c >= 0xd800 && c <= 0xdbff) {
+      // High surrogate: valid only when immediately followed by a low surrogate
+      if (i + 1 < s.length) {
+        const n = s.charCodeAt(i + 1)
+        if (n >= 0xdc00 && n <= 0xdfff) {
+          out += s[i] + s[i + 1]
+          i++
+          continue
+        }
+      }
+      out += "\uFFFD"
+      continue
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) {
+      // Lone low surrogate
+      out += "\uFFFD"
+      continue
+    }
+    out += s[i]
+  }
+  return out
+}
+
+export const nfc = function (s: string): string {
+  return replaceUnpairedSurrogates(s.normalize("NFC"))
+}
+
+/**
  * 对字符串内容进行异步哈希 (支持大字符串分段处理，防止 UI 挂起)
  * Async version of hashContent that yields the thread for large strings
  */
