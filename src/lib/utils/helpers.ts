@@ -234,6 +234,8 @@ export const stringifyRules = function (rules: SyncRule[]): string {
 export const isPathExcluded = function (path: string, plugin: FastSync): boolean {
   const { syncExcludeFolders, syncExcludeExtensions, syncExcludeWhitelist } = plugin.settings
   const normalizedPath = path.replace(/\\/g, "/")
+  // Recovery copies must never be uploaded or deleted by remote sync, even with a whitelist.
+  if (normalizedPath === '.trash' || normalizedPath.startsWith('.trash/')) return true
 
   // 0. 检查白名单 (优先级最高)
   if (syncExcludeWhitelist) {
@@ -312,6 +314,8 @@ export const isInWhitelist = function (path: string, plugin: FastSync): boolean 
  */
 export const configIsPathExcluded = function (relativePath: string, plugin: FastSync): boolean {
   const normalizedPath = relativePath.replace(/\\/g, "/")
+  // Recovery copies must never be uploaded or deleted by remote sync, even with a whitelist.
+  if (normalizedPath === '.trash' || normalizedPath.startsWith('.trash/')) return true
   const { syncExcludeFolders, syncExcludeWhitelist } = plugin.settings
 
   // 固定排除插件自身的数据库和缓存文件，无论如何都不进行同步
@@ -655,7 +659,12 @@ export const yieldToMain = (): Promise<void> => {
   return new Promise((resolve) => {
     if (typeof MessageChannel !== "undefined") {
       const channel = new MessageChannel()
-      channel.port1.onmessage = () => resolve()
+      channel.port1.onmessage = () => {
+        channel.port1.onmessage = null
+        channel.port1.close()
+        channel.port2.close()
+        resolve()
+      }
       channel.port2.postMessage(null)
     } else {
       window.setTimeout(resolve, 0)

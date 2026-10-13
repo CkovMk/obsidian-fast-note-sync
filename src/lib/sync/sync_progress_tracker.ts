@@ -48,6 +48,7 @@ interface TypeProgress {
   // Next page index awaiting ack determination (watermark); can only advance past pages that are
   // already fully completed (completedCount>=totalCount)
   ackWatermark: number;
+  requirePageCompletion: boolean;
 }
 
 /**
@@ -153,6 +154,7 @@ export class SyncProgressTracker {
         initialAckSent: false,
         receivedPageIndexes: new Set<number>(),
         pages: new Map(),
+        requirePageCompletion: false,
         ackWatermark: 0
       });
     }
@@ -336,9 +338,20 @@ export class SyncProgressTracker {
 
   private onStagnationTimeout(type: SyncType): void {
     this.stagnationTimers.delete(type);
-    if (this.isForcedComplete) return;
+    if (this.isForcedComplete || this.isTypeFullyDone(type)) return;
     const highest = this.lastAckedPage.get(type);
     if (highest === undefined) return;
+    // 下一待确认页已收到、只是本地仍在处理（如大附件上传超过 15s）时不能重发 ack：服务端会把
+    // 重复 ack 当作后续页丢失，回退窗口并整批重发，客户端反复收到重复明细。只有该页确实未到达才补发。
+    // If the next page to confirm has already arrived and is still being processed locally (e.g.
+    // large attachment uploads taking longer than 15s), do not resend the ack: the server treats a
+    // repeated ack as lost pages, rewinds its window and resends them all, so the client keeps
+    // receiving duplicate details. Only nudge when that page has genuinely not arrived.
+    const prog = this.progressMap.get(type);
+    if (prog && prog.pages.has(prog.ackWatermark)) {
+      this.scheduleStagnationRecheck(type);
+      return;
+    }
     dump(`[SyncProgressTracker] [Stagnation] 15s with no new detail for type ${type}, resending ack for highest confirmed pageIndex ${highest}`);
     this.onPageComplete?.(type, highest);
     // 继续排下一次检查，连续多次丢包场景下每 15s 补发一次，直到有新明细到达或同步结束
@@ -362,9 +375,10 @@ export class SyncProgressTracker {
    * Record page control message metadata.
    * 记录分页控制消息元数据。
    */
-  recordPageProgress(type: SyncType, pageIndex: number, totalCount: number, isLast: boolean): void {
+  recordPageProgress(type: SyncType, pageIndex: number, totalCount: number, isLast: boolean, requirePageCompletion = false): void {
     const prog = this.progressMap.get(type);
     if (!prog) return;
+    prog.requirePageCompletion ||= requirePageCompletion;
 
     // 分页幂等：同一 pageIndex 重复到达（重传/乱序）时直接忽略，防止 receivedTaskTotal
     // 盲累加、allPagesReceived 被旧包覆盖，导致完成判定永远达不到，卡在 300s 超时分支
@@ -438,6 +452,11 @@ export class SyncProgressTracker {
     const prog = this.progressMap.get(type);
     if (!prog) return true;
     // 使用实际收到的精准下载任务数加上传任务基数判定完成，防止提早判断导致清空 context
+    // Negotiated paged transfers must complete every bucket; unrelated live
+    // acknowledgements must not compensate for unfinished page items.
+    if (prog.requirePageCompletion) {
+      if (Array.from(prog.pages.values()).some(page => page.completedCount < page.totalCount)) return false;
+    }
     const downloadCompleted = prog.pageTaskCompleted - prog.uploadTasksBase;
     return prog.uploadComplete && prog.allPagesReceived && downloadCompleted >= prog.receivedTaskTotal;
   }

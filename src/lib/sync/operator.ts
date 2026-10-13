@@ -221,6 +221,9 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     return;
   }
 
+  // Completion is determined by acknowledgements, never total elapsed time.
+  // Large vaults can keep making progress for hours; request and connection
+  // failures retain their own timeout/cleanup paths.
   const ws = plugin.websocket.ws;
   const bufferedAmount = ws && ws.readyState === WebSocket.OPEN ? ws.bufferedAmount : 0;
 
@@ -306,6 +309,7 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     const offlineGuardSkippedThisRound = plugin.syncState.offlineGuardSkippedThisRound;
 
     plugin.syncState.activeSyncContext = null; // 同步完成，清空活跃的上下文 / Sync completed, reset the active context
+    plugin.isSyncing = false;
     plugin.syncTypeCompleteCount = 0;
     plugin.resetSyncTasks();
     plugin.syncPageStateMap.clear(); // 同步完成，清空残留的页状态 / Sync completed, clear page state map
@@ -338,7 +342,7 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     // 每次同步结束，均核实并更新一次状态栏冲突角标
     plugin.statusBarManager.updateConflictBadge();
 
-    if (plugin.expectedSyncCount > 0 && !plugin.localStorageManager.getMetadata("isInitSync")) {
+    if (totalFailed === 0 && plugin.expectedSyncCount > 0 && !plugin.localStorageManager.getMetadata("isInitSync")) {
       plugin.localStorageManager.setMetadata("isInitSync", true);
     }
 
@@ -350,7 +354,7 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     // was intercepted by the offline guard this round (user clicked "Cancel"), that batch of
     // risky files was never actually handled — refreshing the timestamp would zero out the
     // offline duration and silently defeat the guard on the very next round.
-    if (!offlineGuardSkippedThisRound) {
+    if (!offlineGuardSkippedThisRound && totalFailed === 0) {
       plugin.localStorageManager.setMetadata("lastSyncSuccessTime", Date.now());
     }
 
@@ -375,7 +379,7 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     const detailText = plugin.progressTracker.getDetailText();
     const finalStatusText = detailText ? `${statusText} · ${detailText}` : statusText;
 
-    plugin.updateStatusBar(finalStatusText, overallPercentage, 100);
+    plugin.updateStatusBar(finalStatusText, Math.min(overallPercentage, 99), 100);
   }
 }
 /**
@@ -443,7 +447,7 @@ async function handleSyncPage(data: unknown, plugin: FastSync, type: "note" | "f
   dump(`[PageSync] Received page info for ${type}, pageIndex: ${pageMsg.pageIndex}, totalCount: ${pageMsg.totalCount}, isLast: ${pageMsg.isLast}, context: ${pageMsg.context}`);
 
   // 通知进度追踪器
-  plugin.progressTracker.recordPageProgress(type, pageMsg.pageIndex, pageMsg.totalCount, pageMsg.isLast);
+  plugin.progressTracker.recordPageProgress(type, pageMsg.pageIndex, pageMsg.totalCount, pageMsg.isLast, plugin.syncState.negotiated);
 
   // 登记当前下载分页状态 (Register page metadata)
   plugin.syncPageStateMap.set(type, {
@@ -902,7 +906,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
                 await scheduleHashTask(async () => {
                   try {
                     const contentHash = await Promise.race([
-                      hashContentAsync(await plugin.app.vault.read(file)),
+                      plugin.app.vault.read(file).then(content => hashContentAsync(content)),
                       new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error(`Hash timeout`)), 15000))
                     ]);
                     plugin.scannedNoteHashes.set(notePath, { hash: contentHash, mtime: noteMtime, size: noteSize });
@@ -1264,7 +1268,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
     // 避免旧会话迟到的 finally 打断已经在跑的新会话
     // Same guard: only reset isSyncing when this invocation still owns the active
     // session (or no session is active), so a stale session cannot interrupt a running new one.
-    if (plugin.syncState.activeSyncContext === context || plugin.syncState.activeSyncContext === null) {
+    if (plugin.syncState.activeSyncContext === null) {
       plugin.isSyncing = false;
     }
   }
@@ -1739,8 +1743,7 @@ export const handleRequestSend = async function (plugin: FastSync, syncMode: Syn
     ));
   }
 
-  // 任一类失败不阻断其他类；失败类由 300s 总兜底（checkSyncCompletion）复位
-  // A failure in any single type does not block the others; a failed type is reset by the 300s overall fallback (checkSyncCompletion)
+  // A failed type must remain incomplete; elapsed time cannot turn it into success.
   await Promise.allSettled(jobs);
 
   if (plugin.settings.syncEnabled && shouldSyncNotes) {
