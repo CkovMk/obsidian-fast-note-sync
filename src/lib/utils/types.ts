@@ -111,6 +111,9 @@ export interface FileDownloadSession {
     downloadRetries?: number;
     // Server path hash, stored so the reaper can re-request the download without recomputing it.
     pathHash?: string;
+    // Set the moment a session is failed/cleaned up so no overlapping code path (concurrent
+    // reaper tick, late message) can fail or account for it a second time.
+    dead?: boolean;
 }
 
 export interface ReceiveMtimeMessage {

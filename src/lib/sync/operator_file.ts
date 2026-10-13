@@ -12,6 +12,11 @@ import type FastSync from "../../main";
 let currentDownloadBufferBytes = 0
 const MAX_DOWNLOAD_BUFFER_BYTES = 20 * 1024 * 1024
 
+// Server session ids whose late chunks were dropped as superseded streams (see the
+// resurrection guard in receiveFileSyncChunkDownload). Bounded by the number of replaced
+// sessions; cleared on disconnect along with the temp chunk dirs.
+const droppedSupersededStreams = new Set<string>()
+
 // 上传中的文件追踪，用于删除时取消上传
 const activeUploadsMap = new Map<string, { cancelled: boolean }>()
 
@@ -146,8 +151,14 @@ const formatDownloadError = (e: unknown) => {
 // should count toward fileSyncTasks.failed, kept separate from completed (which still drives
 // completion detection / page ACK unchanged), so failures aren't surfaced as success in the status bar
 const cleanupFileDownloadSession = async (plugin: FastSync, session: FileDownloadSession, failed = false) => {
+  // Mark dead first so an overlapping reaper tick or late message cannot account for it twice.
+  session.dead = true
   releaseSessionMemory(session)
+  // Live sessions are keyed by server sessionId, but temp sessions (no chunk received yet)
+  // are keyed `temp_<path>` with an empty sessionId — remove both so a failed temp session
+  // can't leak into the map as a zombie that gets "failed" again on every reaper tick.
   plugin.fileDownloadSessions.delete(session.sessionId)
+  plugin.fileDownloadSessions.delete(`temp_${session.path}`)
   if (session.tempDir) await clearTempChunksDir(plugin, session.sessionId)
   if (failed) plugin.fileSyncTasks.failed++
   plugin.recordSyncCompleted('file', session.pageIndex)
@@ -177,49 +188,87 @@ const failFileDownloadSession = async (plugin: FastSync, session: FileDownloadSe
 // then fails them cleanly so the run can finish. It never touches actively advancing sessions
 // (guarded by lastActivityAt), and the existing assembly-time all-chunks-present + exact-size
 // checks still protect against writing a corrupt or partial file.
-const DOWNLOAD_STALL_MS = 20000
-const DOWNLOAD_MAX_RETRIES = 3
+//
+// Two-tier thresholds: a session that never received a chunk (server never started streaming)
+// is declared stalled quickly — re-requesting it is cheap since nothing was downloaded yet.
+// A session with partial progress only stalls after a long silence, because on a slow or
+// congested link the gap between chunks of one download can legitimately exceed tens of
+// seconds while up to maxConcurrentUploads downloads share the bandwidth; restarting such a
+// transfer from chunk 0 would discard real progress.
+const DOWNLOAD_STALL_MS = 30000
+const DOWNLOAD_PROGRESS_STALL_MS = 5 * 60 * 1000
+const DOWNLOAD_MAX_RETRIES = 2
+
+// checkSyncCompletion ticks every 100ms and fire-and-forgets this reaper; overlapping runs
+// could otherwise both act on the same session. The dead flag (checked below) is the second
+// line of defense for anything that slips through.
+let reaperInFlight = false
 
 export const reapStalledDownloads = async function (plugin: FastSync) {
-  if (plugin.fileDownloadSessions.size === 0) return
-  const now = Date.now()
-  for (const [key, session] of Array.from(plugin.fileDownloadSessions.entries())) {
-    const last = session.lastActivityAt ?? 0
-    if (now - last < DOWNLOAD_STALL_MS) continue
-    const retries = session.downloadRetries ?? 0
-    if (retries < DOWNLOAD_MAX_RETRIES && session.pathHash) {
-      dumpError(`Download stalled for ${session.path} (retry ${retries + 1}/${DOWNLOAD_MAX_RETRIES}), re-requesting`)
-      releaseSessionMemory(session)
-      if (session.tempDir) await clearTempChunksDir(plugin, session.sessionId).catch(() => { /* ignore */ })
-      plugin.fileDownloadSessions.delete(key)
-      const tempKey = `temp_${session.path}`
-      const slotKey = session.initialSlotKey || `download_${session.path}`
-      plugin.fileDownloadSessions.set(tempKey, {
-        path: session.path,
-        contentHash: session.contentHash,
-        ctime: session.ctime,
-        mtime: session.mtime,
-        lastTime: session.lastTime,
-        sessionId: "",
-        totalChunks: 0,
-        size: session.size,
-        pageIndex: session.pageIndex,
-        initialSlotKey: slotKey,
-        lastActivityAt: Date.now(),
-        downloadRetries: retries + 1,
-        pathHash: session.pathHash,
-        ...createDownloadStorage(plugin, `init_${session.pathHash}`, session.size),
-      })
-      void plugin.websocket.SendMessage("FileChunkDownload", {
-        vault: plugin.settings.vault,
-        path: session.path,
-        pathHash: session.pathHash,
-      })
-    } else {
-      dumpError(`Download failed after retries, giving up (will retry next round): ${session.path}`)
-      await failFileDownloadSession(plugin, session, `Stalled: no progress for ${DOWNLOAD_STALL_MS}ms after ${DOWNLOAD_MAX_RETRIES} retries`)
+  if (reaperInFlight || plugin.fileDownloadSessions.size === 0) return
+  reaperInFlight = true
+  try {
+    const now = Date.now()
+    for (const [key, session] of Array.from(plugin.fileDownloadSessions.entries())) {
+      if (session.dead) continue
+      const stalledMs = session.totalChunks === 0 ? DOWNLOAD_STALL_MS : DOWNLOAD_PROGRESS_STALL_MS
+      if (now - (session.lastActivityAt ?? 0) < stalledMs) continue
+      const retries = session.downloadRetries ?? 0
+      // Only re-request when nothing was downloaded yet; a partially received file is failed
+      // (slot released, page accounted) and picked up again next round instead.
+      if (retries < DOWNLOAD_MAX_RETRIES && session.totalChunks === 0 && session.pathHash) {
+        dumpError(`Download stalled for ${session.path} (retry ${retries + 1}/${DOWNLOAD_MAX_RETRIES}), re-requesting`)
+        releaseSessionMemory(session)
+        session.dead = true
+        if (session.tempDir) await clearTempChunksDir(plugin, session.sessionId).catch(() => { /* ignore */ })
+        plugin.fileDownloadSessions.delete(key)
+        const tempKey = `temp_${session.path}`
+        const slotKey = session.initialSlotKey || `download_${session.path}`
+        plugin.fileDownloadSessions.set(tempKey, {
+          path: session.path,
+          contentHash: session.contentHash,
+          ctime: session.ctime,
+          mtime: session.mtime,
+          lastTime: session.lastTime,
+          sessionId: "",
+          totalChunks: 0,
+          size: session.size,
+          pageIndex: session.pageIndex,
+          initialSlotKey: slotKey,
+          lastActivityAt: Date.now(),
+          downloadRetries: retries + 1,
+          pathHash: session.pathHash,
+          ...createDownloadStorage(plugin, `init_${session.pathHash}`, session.size),
+        })
+        void plugin.websocket.SendMessage("FileChunkDownload", {
+          vault: plugin.settings.vault,
+          path: session.path,
+          pathHash: session.pathHash,
+        })
+      } else {
+        dumpError(`Download failed after retries, giving up (will retry next round): ${session.path}`)
+        // Remove by the actual map key BEFORE failing: temp sessions are keyed `temp_<path>`
+        // with an empty sessionId, so failing first would leave a zombie that every later
+        // reaper tick "fails" again (unbounded log spam + repeated failure accounting).
+        session.dead = true
+        plugin.fileDownloadSessions.delete(key)
+        await failFileDownloadSession(plugin, session, `Stalled: no progress for ${stalledMs}ms after ${retries} retries`)
+      }
     }
+  } finally {
+    reaperInFlight = false
   }
+}
+
+// Returns [mapKey, session] of the live download session currently tracking `path`, if any.
+// Temp sessions are keyed `temp_<path>`; live sessions are keyed by server sessionId.
+const findDownloadSessionForPath = (plugin: FastSync, path: string): [string, FileDownloadSession] | undefined => {
+  const tempSession = plugin.fileDownloadSessions.get(`temp_${path}`)
+  if (tempSession && !tempSession.dead) return [`temp_${path}`, tempSession]
+  for (const [key, session] of plugin.fileDownloadSessions.entries()) {
+    if (session.path === path && !session.dead) return [key, session]
+  }
+  return undefined
 }
 
 const storeMemoryChunk = (session: FileDownloadSession, chunkIndex: number, chunkData: ArrayBuffer) => {
@@ -261,6 +310,7 @@ const fallbackFileDownloadSessionToMemory = async (plugin: FastSync, session: Fi
  * 清理所有残留的临时目录
  */
 export const clearAllTempChunks = async (plugin: FastSync) => {
+  droppedSupersededStreams.clear()
   const path = getTempChunksDir(plugin)
   if (await plugin.app.vault.adapter.exists(path)) {
     dump(`Cleaning all temp chunks: ${path}`)
@@ -883,6 +933,14 @@ export const receiveFileSyncUpdate = async function (data: ReceiveFileSyncUpdate
     }
   }
 
+  // A download for this path is already in flight (or being re-requested by the reaper):
+  // a duplicate FileSyncUpdate must not start a second session. The in-flight session owns
+  // the completion accounting, so nothing is recorded here.
+  if (findDownloadSessionForPath(plugin, data.path)) {
+    dump(`Receive file sync update(download): skipped, download already in progress: ${data.path}`)
+    return
+  }
+
   // 等待并发槽位，防止大量并发下载导致内存耗尽
   const slotKey = `download_${data.path}`
   if (!await plugin.concurrencyLimiter.waitForSlot(slotKey, false, -10)) return;
@@ -1114,6 +1172,18 @@ export const receiveFileSyncChunkDownload = async function (data: FileSyncChunkD
     plugin.fileDownloadSessions.set(data.sessionId, session)
     plugin.fileDownloadSessions.delete(tempKey)
   } else {
+    // No temp session for this path: either a genuine fresh download (e.g. after reconnect)
+    // or a late chunk from a superseded server stream. If any live session already tracks
+    // this path, drop the stale stream — resurrecting it would create a duplicate session
+    // with no page attribution or slot accounting, double-count completion and risk a
+    // double write of the same file.
+    if (findDownloadSessionForPath(plugin, data.path)) {
+      if (!droppedSupersededStreams.has(data.sessionId)) {
+        droppedSupersededStreams.add(data.sessionId)
+        dumpError(`File download stream dropped: superseded session for ${data.path} (${data.sessionId.substring(0, 8)}...)`)
+      }
+      return
+    }
     session = {
       path: data.path,
       contentHash: data.contentHash,
