@@ -1,7 +1,7 @@
 import { TFile, TAbstractFile, normalizePath, Platform } from "obsidian";
 
 import { ReceiveFileSyncUpdateMessage, FileUploadMessage, FileSyncChunkDownloadMessage, FileDownloadSession, ReceiveMtimeMessage, ReceivePathMessage, SyncEndData } from "../utils/types";
-import { hashContent, hashArrayBuffer, getPluginDir, dump, dumpError, sleep, isPathExcluded, getSafeCtime, isLargeBinarySyncRisk, describeBinarySyncLimit, showSyncNotice, checkAndNotifyCaseConflict, logMemorySnapshot, hashFileAsync, vaultDelete } from "../utils/helpers";
+import { hashContent, hashArrayBuffer, getPluginDir, dump, dumpError, sleep, isPathExcluded, getSafeCtime, isLargeBinarySyncRisk, describeBinarySyncLimit, showSyncNotice, checkAndNotifyCaseConflict, logMemorySnapshot, hashFileAsync, vaultDelete, nfc } from "../utils/helpers";
 import { FileCloudPreview } from "../storage/file_cloud_preview";
 import { SyncLogManager } from "./sync_log_manager";
 import { HttpApiService } from "../api/http_api_service";
@@ -373,11 +373,13 @@ export const fileModify = async function (file: TAbstractFile, plugin: FastSync,
   await plugin.lockManager.withLock(file.path, async () => {
     plugin.addIgnoredFile(file.path)
     try {
-      const baseHash = plugin.fileHashManager.getPathHash(file.path)
-      const lastSyncMtime = plugin.lastSyncMtime.get(file.path)
+      // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）；hashFileAsync 用原始本地路径读盘
+      const p = nfc(file.path)
+      const baseHash = plugin.fileHashManager.getPathHash(p)
+      const lastSyncMtime = plugin.lastSyncMtime.get(p)
 
       // --- 优化：先尝试从缓存获取有效哈希 ---
-      let contentHash = plugin.fileHashManager.getValidHash(file.path, file.stat.mtime, file.stat.size);
+      let contentHash = plugin.fileHashManager.getValidHash(p, file.stat.mtime, file.stat.size);
 
       if (contentHash !== null) {
         if (!forceCheck && contentHash === baseHash && (lastSyncMtime !== undefined && lastSyncMtime === file.stat.mtime)) {
@@ -391,8 +393,8 @@ export const fileModify = async function (file: TAbstractFile, plugin: FastSync,
 
       const data = {
         vault: plugin.settings.vault,
-        path: file.path,
-        pathHash: hashContent(file.path),
+        path: p,
+        pathHash: hashContent(p),
         contentHash: contentHash,
         mtime: file.stat.mtime,
         ctime: getSafeCtime(file.stat),
@@ -404,12 +406,12 @@ export const fileModify = async function (file: TAbstractFile, plugin: FastSync,
       // Temporarily store hash in pending map, update hashManager only after server FileUploadAck
       // 新建操作覆盖删除意图，清除 pending 防止晚到的 Ack 错误删除新文件 hash
       // New upload supersedes delete intent; clear pending to prevent stale Ack from removing new hash
-      plugin.pendingFileDeleteAcks.delete(file.path)
-      plugin.pendingUploadHashes.set(file.path, contentHash)
+      plugin.pendingFileDeleteAcks.delete(p)
+      plugin.pendingUploadHashes.set(p, contentHash)
       plugin.localStorageManager.savePending('pendingUploadHashes', plugin.pendingUploadHashes)
       if (!await plugin.concurrencyLimiter.waitForSlot(file.path)) return
-      uploadContexts.set(file.path, plugin.syncState.activeSyncContext)
-      armUploadAckTimeout(file.path, plugin)
+      uploadContexts.set(p, plugin.syncState.activeSyncContext)
+      armUploadAckTimeout(p, plugin)
       void plugin.websocket.SendMessage("FileUploadCheck", data)
       dump(`File modify check sent`, data.path, data.contentHash)
     } finally {
@@ -429,41 +431,44 @@ export const fileDelete = async function (file: TAbstractFile, plugin: FastSync,
   if (isPathExcluded(file.path, plugin)) return
 
 
+  // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）
+  const p = nfc(file.path)
+
   // --- 新增：删除拦截 ---
-  if (plugin.lastSyncPathDeleted.has(file.path)) {
+  if (plugin.lastSyncPathDeleted.has(p)) {
     dump(`File delete intercepted: ${file.path}`)
     return
   }
 
   await plugin.lockManager.withLock(file.path, async () => {
     // 如果该文件正在上传或在队列中，则标记为取消，且不再发送服务端删除消息
-    if (activeUploadsMap.has(file.path)) {
-      activeUploadsMap.get(file.path)!.cancelled = true;
+    if (activeUploadsMap.has(p)) {
+      activeUploadsMap.get(p)!.cancelled = true;
       dump(`Upload cancelled due to file deletion: ${file.path}`);
       // 仅清理本地状态
-      plugin.fileHashManager.removeFileHash(file.path)
-      plugin.pendingUploadHashes.delete(file.path)
+      plugin.fileHashManager.removeFileHash(p)
+      plugin.pendingUploadHashes.delete(p)
       plugin.localStorageManager.savePending('pendingUploadHashes', plugin.pendingUploadHashes)
       return
     }
 
     // 清理可能存在的待确认上传记录，避免 pending map 内存泄漏
     // Clean up any pending upload record to avoid pending map memory leak
-    plugin.pendingUploadHashes.delete(file.path)
+    plugin.pendingUploadHashes.delete(p)
     plugin.localStorageManager.savePending('pendingUploadHashes', plugin.pendingUploadHashes)
 
     plugin.addIgnoredFile(file.path)
     try {
       const data = {
         vault: plugin.settings.vault,
-        path: file.path,
-        pathHash: hashContent(file.path),
+        path: p,
+        pathHash: hashContent(p),
       }
       if (!await plugin.concurrencyLimiter.waitForSlot(file.path)) return
       void plugin.websocket.SendMessage("FileDelete", data, undefined, () => {
         // 消息真正写入 TCP 缓冲区后加入 pending set，等待 FileDeleteAck 再删 hash
         // Add to pending set only after message is actually buffered; remove hash only on FileDeleteAck
-        plugin.pendingFileDeleteAcks.add(file.path)
+        plugin.pendingFileDeleteAcks.add(p)
       })
       dump(`File delete send`, file.path)
     } finally {
@@ -481,22 +486,24 @@ export const fileDeleteByPath = async function (filePath: string, plugin: FastSy
   if (filePath.endsWith(".md")) return
   if (isPathExcluded(filePath, plugin)) return
 
-  if (plugin.lastSyncPathDeleted.has(filePath)) return
+  // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）
+  const p = nfc(filePath)
+  if (plugin.lastSyncPathDeleted.has(p)) return
 
   await plugin.lockManager.withLock(filePath, async () => {
     // 如果该文件正在上传或在队列中，则标记为取消，且不再发送服务端删除消息
     // If the file is being uploaded or in the queue, cancel and skip server delete
-    if (activeUploadsMap.has(filePath)) {
-      activeUploadsMap.get(filePath)!.cancelled = true;
-      plugin.fileHashManager.removeFileHash(filePath)
-      plugin.pendingUploadHashes.delete(filePath)
+    if (activeUploadsMap.has(p)) {
+      activeUploadsMap.get(p)!.cancelled = true;
+      plugin.fileHashManager.removeFileHash(p)
+      plugin.pendingUploadHashes.delete(p)
       plugin.localStorageManager.savePending('pendingUploadHashes', plugin.pendingUploadHashes)
       return
     }
 
     // 清理可能存在的待确认上传记录，避免 pending map 内存泄漏
     // Clean up any pending upload record to avoid pending map memory leak
-    plugin.pendingUploadHashes.delete(filePath)
+    plugin.pendingUploadHashes.delete(p)
     plugin.localStorageManager.savePending('pendingUploadHashes', plugin.pendingUploadHashes)
 
     plugin.addIgnoredFile(filePath)
@@ -504,12 +511,12 @@ export const fileDeleteByPath = async function (filePath: string, plugin: FastSy
       if (!await plugin.concurrencyLimiter.waitForSlot(filePath)) return
       void plugin.websocket.SendMessage("FileDelete", {
         vault: plugin.settings.vault,
-        path: filePath,
-        pathHash: hashContent(filePath),
+        path: p,
+        pathHash: hashContent(p),
       }, undefined, () => {
         // 消息真正写入 TCP 缓冲区后加入 pending set，等待 FileDeleteAck 再删 hash
         // Add to pending set only after message is actually buffered; remove hash only on FileDeleteAck
-        plugin.pendingFileDeleteAcks.add(filePath)
+        plugin.pendingFileDeleteAcks.add(p)
       })
       dump(`File delete by path send`, filePath)
     } finally {
@@ -550,8 +557,12 @@ export const fileRename = async function (file: TAbstractFile, oldfile: string, 
 
   if (!(file instanceof TFile)) return
 
+  // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）；hashFileAsync 用原始本地路径读盘
+  const p = nfc(file.path)
+  const oldP = nfc(oldfile)
+
   // --- 新增：重命名拦截 ---
-  if (plugin.lastSyncPathRenamed.has(file.path)) {
+  if (plugin.lastSyncPathRenamed.has(p)) {
     dump(`File rename intercepted: ${file.path}`)
     return
   }
@@ -562,17 +573,17 @@ export const fileRename = async function (file: TAbstractFile, oldfile: string, 
       dump(`File rename`, oldfile, file.path)
 
       // 如果旧文件正在上传，则取消上传且不发送删除消息
-      if (activeUploadsMap.has(oldfile)) {
-        activeUploadsMap.get(oldfile)!.cancelled = true;
+      if (activeUploadsMap.has(oldP)) {
+        activeUploadsMap.get(oldP)!.cancelled = true;
         // 重新上传
         void fileModify(file, plugin)
         dump(`Upload cancelled due to file rename: ${oldfile}`);
       } else {
 
-        let contentHash = plugin.fileHashManager.getPathHash(oldfile)
+        let contentHash = plugin.fileHashManager.getPathHash(oldP)
         if (contentHash == null) {
           // 尝试新路径哈希缓存 (Try new path cache)
-          contentHash = plugin.fileHashManager.getValidHash(file.path, file.stat.mtime, file.stat.size);
+          contentHash = plugin.fileHashManager.getValidHash(p, file.stat.mtime, file.stat.size);
           if (contentHash == null) {
             if (isLargeBinarySyncRisk(file.stat.size, plugin)) {
               dump(`Skip rename hash for large attachment (${describeBinarySyncLimit()} limit): ${file.path}`, file.stat.size)
@@ -584,14 +595,14 @@ export const fileRename = async function (file: TAbstractFile, oldfile: string, 
 
         const data = {
           vault: plugin.settings.vault,
-          oldPath: oldfile,
-          oldPathHash: hashContent(oldfile),
-          path: file.path,
-          pathHash: hashContent(file.path),
+          oldPath: oldP,
+          oldPathHash: hashContent(oldP),
+          path: p,
+          pathHash: hashContent(p),
         }
         // 将重命名推入待确认队列，等待服务端 FileRenameAck 后再更新 hashManager
         // Push rename to pending queue; hashManager will be updated after server FileRenameAck
-        plugin.pendingFileRenames.push({ oldPath: oldfile, newPath: file.path, contentHash })
+        plugin.pendingFileRenames.push({ oldPath: oldP, newPath: p, contentHash })
         if (!await plugin.concurrencyLimiter.waitForSlot(file.path, true)) return
         void plugin.websocket.SendMessage("FileRename", data)
       }
@@ -851,11 +862,13 @@ export const receiveFileUpload = async function (data: FileUploadMessage, plugin
           if (isPluginUnloading) return;
           try {
             const apiService = new HttpApiService(plugin);
-            const serverInfo = await apiService.getFileInfo(file.path);
+            // 服务端记录为 NFC 形式（见 nfc() 注释），查询/比较需用同形路径
+            const p = nfc(file.path);
+            const serverInfo = await apiService.getFileInfo(p);
 
             if (serverInfo) {
               // 核对 path、size、mtime 是否一致
-              if (serverInfo.path === file.path &&
+              if (serverInfo.path === p &&
                 serverInfo.size === file.stat.size &&
                 serverInfo.mtime === file.stat.mtime) {
                 dump(`Cloud Preview: Auto delete verified file: ${file.path}`);
@@ -1287,7 +1300,8 @@ export const checkAndUploadAttachments = async function (plugin: FastSync) {
 
     checkedCount++;
     try {
-      const res = await apiService.getFileInfo(file.path);
+      // 服务端记录为 NFC 形式（见 nfc() 注释），查询需用同形路径，否则 NFD 本地路径会误判为"不存在"
+      const res = await apiService.getFileInfo(nfc(file.path));
 
       // 如果没有数据，说明服务端不存在
       if (!res) {

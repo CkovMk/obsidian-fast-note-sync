@@ -1,6 +1,6 @@
 import { TFolder } from "obsidian";
 
-import { dump, isFolderSyncPathExcluded, debounce, LocalStateFileMirror } from "../utils/helpers";
+import { dump, isFolderSyncPathExcluded, debounce, LocalStateFileMirror, nfc } from "../utils/helpers";
 import type FastSync from "../../main";
 
 // 对账延迟：初始化后等待若干秒再比对，避开插件刚加载时的启动开销高峰
@@ -112,7 +112,8 @@ export class FolderSnapshotManager {
             for (const file of files) {
                 if (file instanceof TFolder) {
                     if (file.path === "/" || isFolderSyncPathExcluded(file.path, this.plugin)) continue;
-                    vaultFolderPaths.add(file.path);
+                    // 与快照表键保持同形（NFC，见 nfc() 注释）
+                    vaultFolderPaths.add(nfc(file.path));
                 }
             }
 
@@ -162,7 +163,8 @@ export class FolderSnapshotManager {
                     if (file.path === "/" || isFolderSyncPathExcluded(file.path, this.plugin)) continue;
 
                     // 初始快照时，所有文件夹的 mtime 设为当前时间 (虚拟化)
-                    this.snapshotMap.set(file.path, now);
+                    // 键统一 NFC 规范化（见 nfc() 注释）
+                    this.snapshotMap.set(nfc(file.path), now);
                 }
             }
             this.saveToStorage();
@@ -175,7 +177,7 @@ export class FolderSnapshotManager {
      * 获取路径的快照时间
      */
     getMtime(path: string): number | null {
-        return this.snapshotMap.get(path) || null;
+        return this.snapshotMap.get(nfc(path)) || null;
     }
 
     /**
@@ -189,7 +191,10 @@ export class FolderSnapshotManager {
      * 更新单个文件夹的快照时间
      */
     setFolderMtime(path: string, mtime: number): void {
-        this.snapshotMap.set(path, mtime);
+        const key = nfc(path);
+        this.snapshotMap.set(key, mtime);
+        // 清理同一视觉路径的旧 Unicode 形式键（NFD→NFC 迁移后的残留）
+        if (key !== path) this.snapshotMap.delete(path);
         this.scheduleSave();
     }
 
@@ -198,7 +203,9 @@ export class FolderSnapshotManager {
      */
     setFolderMtimes(paths: string[], mtime: number): void {
         for (const path of paths) {
-            this.snapshotMap.set(path, mtime);
+            const key = nfc(path);
+            this.snapshotMap.set(key, mtime);
+            if (key !== path) this.snapshotMap.delete(path);
         }
         this.saveToStorage();
     }
@@ -207,7 +214,8 @@ export class FolderSnapshotManager {
      * 删除路径快照
      */
     removeFolder(path: string): void {
-        if (this.snapshotMap.delete(path)) {
+        const key = nfc(path);
+        if (this.snapshotMap.delete(key) || this.snapshotMap.delete(path)) {
             this.scheduleSave();
         }
     }
@@ -218,7 +226,8 @@ export class FolderSnapshotManager {
     removeFolders(paths: Iterable<string>): void {
         let changed = false;
         for (const path of paths) {
-            if (this.snapshotMap.delete(path)) {
+            const key = nfc(path);
+            if (this.snapshotMap.delete(key) || this.snapshotMap.delete(path)) {
                 changed = true;
             }
         }
@@ -268,9 +277,17 @@ export class FolderSnapshotManager {
     private parseAndLoad(data: string): boolean {
         try {
             const parsed = JSON.parse(data) as Record<string, number>;
-            this.snapshotMap = new Map(
-                Object.entries(parsed).map(([key, value]) => [key, Number(value)])
-            );
+            // 键统一 NFC 规范化（迁移旧数据中可能存在的 NFD 路径，见 nfc() 注释）；
+            // 同一视觉路径若以不同 Unicode 形式重复出现，保留 mtime 较新的一条
+            const normalized = new Map<string, number>();
+            for (const [path, value] of Object.entries(parsed)) {
+                const key = nfc(path);
+                const mtime = Number(value);
+                if (!normalized.has(key) || mtime >= (normalized.get(key) ?? 0)) {
+                    normalized.set(key, mtime);
+                }
+            }
+            this.snapshotMap = normalized;
             return true;
         } catch (error) {
             dump("FolderSnapshotManager: 解析快照数据失败", error);

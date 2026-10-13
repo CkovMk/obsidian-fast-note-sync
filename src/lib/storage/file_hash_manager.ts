@@ -1,4 +1,4 @@
-import { hashContentAsync, dump, isPathExcluded, showSyncNotice, isLargeBinarySyncRisk, describeBinarySyncLimit, logMemorySnapshot, hashFileAsync, debounce, LocalStateFileMirror } from "../utils/helpers";
+import { hashContentAsync, dump, isPathExcluded, showSyncNotice, isLargeBinarySyncRisk, describeBinarySyncLimit, logMemorySnapshot, hashFileAsync, debounce, LocalStateFileMirror, nfc } from "../utils/helpers";
 import type FastSync from "../../main";
 
 
@@ -133,7 +133,14 @@ export class FileHashManager {
   private parseAndLoadSync(data: string): boolean {
     try {
       const parsed = JSON.parse(data) as Record<string, string>;
-      this.syncHashMap = new Map(Object.entries(parsed));
+      // 键统一 NFC 规范化（迁移旧数据中可能存在的 NFD 路径，见 nfc() 注释）
+      // Canonicalize keys to NFC (migrates any NFD paths persisted by older builds)
+      const normalized = new Map<string, string>();
+      for (const [path, hash] of Object.entries(parsed)) {
+        const key = nfc(path);
+        if (!normalized.has(key)) normalized.set(key, hash);
+      }
+      this.syncHashMap = normalized;
       return true;
     } catch (error) {
       dump("FileHashManager: 解析同步基准哈希数据失败", error);
@@ -249,7 +256,7 @@ export class FileHashManager {
    * 如果缓存存在且 mtime/size 匹配，则返回缓存的哈希，否则返回 null
    */
   getValidHash(path: string, mtime: number, size: number): string | null {
-    const cache = this.hashMap.get(path);
+    const cache = this.hashMap.get(nfc(path));
     if (cache && cache.mtime === mtime && cache.size === size) {
       return cache.hash;
     }
@@ -260,7 +267,7 @@ export class FileHashManager {
    * 获取指定路径的同步基准哈希值 (提供给同步作为 baseHash 的唯一来源)
    */
   getPathHash(path: string): string | null {
-    return this.syncHashMap.get(path) || null;
+    return this.syncHashMap.get(nfc(path)) || null;
   }
 
   /**
@@ -274,8 +281,14 @@ export class FileHashManager {
    * 添加或更新单个文件的对齐基准哈希值 (在 Ack 确认或收到推送时调用)
    */
   setFileHash(path: string, hash: string, mtime: number = 0, size: number = 0): void {
-    this.hashMap.set(path, { hash, mtime, size });
-    this.syncHashMap.set(path, hash);
+    const key = nfc(path);
+    this.hashMap.set(key, { hash, mtime, size });
+    this.syncHashMap.set(key, hash);
+    // 清理同一视觉路径的旧 Unicode 形式键（NFD→NFC 迁移后的残留）
+    if (key !== path) {
+      this.hashMap.delete(path);
+      this.syncHashMap.delete(path);
+    }
     this.scheduleSave();
   }
 
@@ -286,8 +299,9 @@ export class FileHashManager {
   setFileHashes(entries: Iterable<[string, string]>, getStat?: (path: string) => { mtime?: number; size?: number } | null | undefined): void {
     let changed = false;
     for (const [path, hash] of entries) {
+      const key = nfc(path);
       const stat = getStat?.(path);
-      this.hashMap.set(path, { hash, mtime: stat?.mtime || 0, size: stat?.size || 0 });
+      this.hashMap.set(key, { hash, mtime: stat?.mtime || 0, size: stat?.size || 0 });
       changed = true;
     }
     if (changed) this.saveToStorage();
@@ -297,8 +311,9 @@ export class FileHashManager {
    * 删除指定路径的哈希
    */
   removeFileHash(path: string): void {
-    const deleted1 = this.hashMap.delete(path);
-    const deleted2 = this.syncHashMap.delete(path);
+    const key = nfc(path);
+    const deleted1 = this.hashMap.delete(key) || this.hashMap.delete(path);
+    const deleted2 = this.syncHashMap.delete(key) || this.syncHashMap.delete(path);
     if (deleted1 || deleted2) {
       this.scheduleSave();
     }
@@ -307,8 +322,9 @@ export class FileHashManager {
   removeFileHashes(paths: Iterable<string>): void {
     let changed = false;
     for (const path of paths) {
-      changed = this.hashMap.delete(path) || changed;
-      changed = this.syncHashMap.delete(path) || changed;
+      const key = nfc(path);
+      changed = this.hashMap.delete(key) || this.hashMap.delete(path) || changed;
+      changed = this.syncHashMap.delete(key) || this.syncHashMap.delete(path) || changed;
     }
     if (changed) this.scheduleSave();
   }
@@ -362,14 +378,24 @@ export class FileHashManager {
       let needsSave = false;
 
       for (const [path, value] of Object.entries(parsed)) {
+        // 键统一 NFC 规范化（迁移旧数据中可能存在的 NFD 路径，见 nfc() 注释）
+        const key = nfc(path);
+        if (key !== path) needsSave = true;
         if (typeof value === "string") {
           // 旧版数据：只有哈希。由于缺失 mtime/size，我们将它们设为 0，
           // 这样下次同步时会重新触发计算并更新为新格式。
           // Old data: hash only. Set mtime/size to 0 so next sync triggers recalculation and updates to new format.
-          migratedMap.set(path, { hash: value, mtime: 0, size: 0 });
-          needsSave = true;
+          if (!migratedMap.has(key)) {
+            migratedMap.set(key, { hash: value, mtime: 0, size: 0 });
+            needsSave = true;
+          }
         } else {
-          migratedMap.set(path, value as HashCache);
+          // 同一视觉路径若以不同 Unicode 形式重复出现，保留 mtime 较新的一条
+          const existing = migratedMap.get(key);
+          const incoming = value as HashCache;
+          if (!existing || (incoming.mtime || 0) >= (existing.mtime || 0)) {
+            migratedMap.set(key, incoming);
+          }
         }
       }
 
@@ -470,9 +496,10 @@ export class FileHashManager {
     if (scanned.size === 0) return;
     let changed = false;
     for (const [path, cache] of scanned) {
-      const existing = this.hashMap.get(path);
+      const key = nfc(path);
+      const existing = this.hashMap.get(key);
       if (!existing || existing.mtime <= cache.mtime) {
-        this.hashMap.set(path, { hash: cache.hash, mtime: cache.mtime, size: cache.size });
+        this.hashMap.set(key, { hash: cache.hash, mtime: cache.mtime, size: cache.size });
         changed = true;
       }
     }

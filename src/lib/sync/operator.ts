@@ -1,7 +1,7 @@
 import { TFolder, TFile, normalizePath } from "obsidian";
 
 import { receiveFileUpload, receiveFileSyncUpdate, receiveFileSyncDelete, receiveFileSyncMtime, receiveFileSyncChunkDownload, receiveFileSyncEnd, checkAndUploadAttachments, receiveFileSyncRename, receiveFileRenameAck, receiveFileUploadAck, receiveFileDeleteAck, isPluginUnloading, reapStalledDownloads } from "./operator_file";
-import { hashContent, hashContentAsync, dump, isPathExcluded, isFolderSyncPathExcluded, configIsPathExcluded, getConfigSyncCustomDirs, generateUUID, showSyncNotice, isLargeBinarySyncRisk, describeBinarySyncLimit, hashFileAsync, formatFileSize, yieldToMain, getPluginDir } from "../utils/helpers";
+import { hashContent, hashContentAsync, dump, isPathExcluded, isFolderSyncPathExcluded, configIsPathExcluded, getConfigSyncCustomDirs, generateUUID, showSyncNotice, isLargeBinarySyncRisk, describeBinarySyncLimit, hashFileAsync, formatFileSize, yieldToMain, getPluginDir, nfc } from "../utils/helpers";
 import { receiveConfigSyncModify, receiveConfigUpload, receiveConfigSyncMtime, receiveConfigSyncDelete, receiveConfigSyncEnd, configAllPaths, receiveConfigSyncClear, receiveConfigModifyAck, receiveConfigDeleteAck } from "./operator_config";
 import { receiveNoteSyncModify, receiveNoteUpload, receiveNoteSyncMtime, receiveNoteSyncDelete, receiveNoteSyncEnd, receiveNoteSyncRename, receiveNoteModifyAck, receiveNoteRenameAck, receiveNoteDeleteAck } from "./operator_note";
 import { SyncMode, SnapFile, SnapFolder, SyncEndData, PathHashFile, NoteSyncData, FileSyncData, ConfigSyncData, FolderSyncData } from "../utils/types";
@@ -821,11 +821,14 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
           if (file instanceof TFolder) {
             if (file.path === "/") continue;
             if (isFolderSyncPathExcluded(file.path, plugin)) continue;
-            let mtime = plugin.folderSnapshotManager.getMtime(file.path) || Date.now();
-            if (isLoadLastTime && mtime < Number(plugin.localStorageManager.getMetadata("lastFolderSyncTime")) && plugin.folderSnapshotManager.getMtime(file.path) !== undefined) continue;
+            // 出站路径统一 NFC 规范化（见 nfc() 注释）：iOS 本地 NFD 路径在此转为 NFC，
+            // pathHash 与 path 同形计算，保证跨端同一视觉路径得到同一哈希
+            const p = nfc(file.path);
+            let mtime = plugin.folderSnapshotManager.getMtime(p) || Date.now();
+            if (isLoadLastTime && mtime < Number(plugin.localStorageManager.getMetadata("lastFolderSyncTime")) && plugin.folderSnapshotManager.getMtime(p) !== undefined) continue;
             folders.push({
-              path: file.path,
-              pathHash: hashContent(file.path),
+              path: p,
+              pathHash: hashContent(p),
             });
             continue;
           }
@@ -833,22 +836,25 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
           if (file instanceof TFile) {
             if (isPathExcluded(file.path, plugin)) continue;
             if (file.extension === "md") {
+              // 出站路径统一 NFC 规范化（见 nfc() 注释）；本地 Map 键（pendingNoteModifies /
+              // conflictedPaths / fileHashManager）均已按同形维护，比较前无需再转换
+              const p = nfc(file.path);
               if (isLoadLastTime
                 && file.stat.mtime < Number(plugin.localStorageManager.getMetadata("lastNoteSyncTime"))
-                && plugin.fileHashManager.getPathHash(file.path) !== null
-                && !plugin.pendingNoteModifies.has(file.path)
-                && !plugin.syncState.conflictedPaths.has(file.path)) continue;
+                && plugin.fileHashManager.getPathHash(p) !== null
+                && !plugin.pendingNoteModifies.has(p)
+                && !plugin.syncState.conflictedPaths.has(p)) continue;
 
               // Skip excessively large .md files (>noteSyncLimit MB)
               const noteLimit = (plugin.settings.noteSyncLimit ?? 20) * 1024 * 1024;
               if (file.stat.size > noteLimit) continue;
 
-              const cachedNoteHash = plugin.fileHashManager.getValidHash(file.path, file.stat.mtime, file.stat.size);
+              const cachedNoteHash = plugin.fileHashManager.getValidHash(p, file.stat.mtime, file.stat.size);
               if (cachedNoteHash !== null) {
-                const baseHash = plugin.fileHashManager.getPathHash(file.path);
+                const baseHash = plugin.fileHashManager.getPathHash(p);
                 notes.push({
-                  path: file.path,
-                  pathHash: hashContent(file.path),
+                  path: p,
+                  pathHash: hashContent(p),
                   contentHash: cachedNoteHash,
                   mtime: file.stat.mtime,
                   ctime: file.stat.ctime,
@@ -858,7 +864,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
               } else {
                 if (hashComputeCount >= MAX_HASH_PER_CYCLE) continue;
                 hashComputeCount++;
-                const notePath = file.path, noteMtime = file.stat.mtime, noteCtime = file.stat.ctime, noteSize = file.stat.size;
+                const notePath = p, noteMtime = file.stat.mtime, noteCtime = file.stat.ctime, noteSize = file.stat.size;
                 await scheduleHashTask(async () => {
                   try {
                     const contentHash = await Promise.race([
@@ -888,17 +894,19 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
               const skipSync = plugin.settings.cloudPreviewEnabled && (!plugin.settings.cloudPreviewTypeRestricted || FileCloudPreview.isRestrictedType("." + file.extension));
               if (skipSync) continue;
 
+              // 出站路径统一 NFC 规范化（见 nfc() 注释）；本地 Map 键均已按同形维护
+              const p = nfc(file.path);
               if (isLoadLastTime
                 && file.stat.mtime < Number(plugin.localStorageManager.getMetadata("lastFileSyncTime"))
-                && plugin.fileHashManager.getPathHash(file.path) !== null
-                && !plugin.pendingUploadHashes.has(file.path)) continue;
+                && plugin.fileHashManager.getPathHash(p) !== null
+                && !plugin.pendingUploadHashes.has(p)) continue;
 
-              const cachedFileHash = plugin.fileHashManager.getValidHash(file.path, file.stat.mtime, file.stat.size);
+              const cachedFileHash = plugin.fileHashManager.getValidHash(p, file.stat.mtime, file.stat.size);
               if (cachedFileHash !== null) {
-                const baseHash = plugin.fileHashManager.getPathHash(file.path);
+                const baseHash = plugin.fileHashManager.getPathHash(p);
                 files.push({
-                  path: file.path,
-                  pathHash: hashContent(file.path),
+                  path: p,
+                  pathHash: hashContent(p),
                   contentHash: cachedFileHash,
                   mtime: file.stat.mtime,
                   ctime: file.stat.ctime,
@@ -908,7 +916,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
               } else {
                 if (hashComputeCount >= MAX_HASH_PER_CYCLE) continue;
                 hashComputeCount++;
-                const attPath = file.path, attMtime = file.stat.mtime, attCtime = file.stat.ctime, attSize = file.stat.size;
+                const attPath = p, attMtime = file.stat.mtime, attCtime = file.stat.ctime, attSize = file.stat.size;
                 await scheduleHashTask(async () => {
                   try {
                     const contentHash = await Promise.race([
@@ -952,14 +960,17 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
       // 检测被删除的文件 (对比哈希表和本地 Vault)
       if (plugin.settings.offlineDeleteSyncEnabled) {
         const trackedPaths = plugin.fileHashManager.getAllPaths();
-        const localPathsSet = new Set(list.map(f => f.path)); // 优化：使用 Set 提高查找效率
+        // 本地路径统一 NFC 规范化后再比较（见 nfc() 注释）：避免 iPad 本地 NFD 路径
+        // 与哈希表 NFC 键形式不一致而被误判为"已删除"，进而触发离线删除同步
+        const localPathsSet = new Set(list.map(f => nfc(f.path))); // 优化：使用 Set 提高查找效率
         let delCount = 0;
         for (const path of trackedPaths) {
           if (++delCount % 100 === 0) await yieldToMain();
-          if (isPathExcluded(path, plugin)) continue;
-          if (!localPathsSet.has(path)) {
-            const item = { path: path, pathHash: hashContent(path) };
-            if (path.endsWith(".md")) {
+          const p = nfc(path);
+          if (isPathExcluded(p, plugin)) continue;
+          if (!localPathsSet.has(p)) {
+            const item = { path: p, pathHash: hashContent(p) };
+            if (p.endsWith(".md")) {
               delNotes.push(item);
             } else {
               delFiles.push(item);
@@ -970,27 +981,29 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
         // 检测被删除的文件夹
         if (plugin.folderSnapshotManager && plugin.folderSnapshotManager.isReady()) {
           const trackedFolderPaths = plugin.folderSnapshotManager.getAllPaths();
-          const localFolderPathsSet = new Set(list.filter(f => f instanceof TFolder).map(f => f.path));
+          const localFolderPathsSet = new Set(list.filter(f => f instanceof TFolder).map(f => nfc(f.path)));
           let folderCount = 0;
           for (const path of trackedFolderPaths) {
             if (++folderCount % 100 === 0) await yieldToMain();
-            if (isFolderSyncPathExcluded(path, plugin)) continue;
-            if (!localFolderPathsSet.has(path)) {
-              delFolders.push({ path: path, pathHash: hashContent(path) });
+            const p = nfc(path);
+            if (isFolderSyncPathExcluded(p, plugin)) continue;
+            if (!localFolderPathsSet.has(p)) {
+              delFolders.push({ path: p, pathHash: hashContent(p) });
             }
           }
         }
       } else if (isLoadLastTime) {
         // 增量同步且未开启离线删除同步：检测缺失的文件（哈希表中有但本地不存在）
         const trackedPaths = plugin.fileHashManager.getAllPaths();
-        const localPathsSet = new Set(list.map(f => f.path));
+        const localPathsSet = new Set(list.map(f => nfc(f.path)));
         let missingCount = 0;
         for (const path of trackedPaths) {
           if (++missingCount % 100 === 0) await yieldToMain();
-          if (isPathExcluded(path, plugin)) continue;
-          if (!localPathsSet.has(path)) {
-            const item = { path: path, pathHash: hashContent(path) };
-            if (path.endsWith(".md")) {
+          const p = nfc(path);
+          if (isPathExcluded(p, plugin)) continue;
+          if (!localPathsSet.has(p)) {
+            const item = { path: p, pathHash: hashContent(p) };
+            if (p.endsWith(".md")) {
               missingNotes.push(item);
             } else {
               missingFiles.push(item);
@@ -1001,13 +1014,14 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
         // 检测缺失的文件夹
         if (plugin.folderSnapshotManager && plugin.folderSnapshotManager.isReady()) {
           const trackedFolderPaths = plugin.folderSnapshotManager.getAllPaths();
-          const localFolderPathsSet = new Set(list.filter(f => f instanceof TFolder).map(f => f.path));
+          const localFolderPathsSet = new Set(list.filter(f => f instanceof TFolder).map(f => nfc(f.path)));
           let folderCount = 0;
           for (const path of trackedFolderPaths) {
             if (++folderCount % 100 === 0) await yieldToMain();
-            if (isFolderSyncPathExcluded(path, plugin)) continue;
-            if (!localFolderPathsSet.has(path)) {
-              missingFolders.push({ path: path, pathHash: hashContent(path) });
+            const p = nfc(path);
+            if (isFolderSyncPathExcluded(p, plugin)) continue;
+            if (!localFolderPathsSet.has(p)) {
+              missingFolders.push({ path: p, pathHash: hashContent(p) });
             }
           }
         }
@@ -1057,9 +1071,11 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
           dump(`Skip scanning large config file (${describeBinarySyncLimit(plugin)} limit): ${path}`, stat.size);
           continue;
         }
+        // 协议字段/Map 键用 NFC 形式（见 nfc() 注释）；adapter I/O 仍用原始本地路径
+        const p = nfc(path);
         if (isLoadLastTime
           && stat.mtime < Number(plugin.localStorageManager.getMetadata("lastConfigSyncTime"))
-          && !plugin.pendingConfigModifies.has(path)) continue;
+          && !plugin.pendingConfigModifies.has(p)) continue;
 
         // 处理大配置文件时更新消息
         if (stat.size > 2 * 1024 * 1024) {
@@ -1077,7 +1093,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
           try {
             contentHash = await hashFileAsync(plugin.app, path);
             // 暂存哈希，待同步结束时统一存入 (Temporarily store hash, commit on sync end)
-            plugin.scannedConfigHashes.set(path, { hash: contentHash, mtime: stat.mtime, size: stat.size });
+            plugin.scannedConfigHashes.set(p, { hash: contentHash, mtime: stat.mtime, size: stat.size });
             // 注意：hashFileAsync 内部已经带了 [Calc] 类型的 dump
           } catch (e) {
             console.warn(`[FastNoteSync] 哈希配置失败，跳过: ${path}`, e);
@@ -1088,8 +1104,8 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
         }
 
         configs.push({
-          path: path,
-          pathHash: hashContent(path),
+          path: p,
+          pathHash: hashContent(p),
           contentHash: contentHash,
           mtime: stat.mtime,
           ctime: stat.ctime,
@@ -1114,7 +1130,8 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
     if (plugin.settings.configSyncEnabled && shouldSyncConfigs && plugin.settings.offlineDeleteSyncEnabled) {
       if (plugin.configHashManager && plugin.configHashManager.isReady()) {
         const trackedConfigPaths = plugin.configHashManager.getAllPaths();
-        const localConfigPathsSet = new Set(configPaths);
+        // 本地路径统一 NFC 规范化后再比较（见 nfc() 注释）
+        const localConfigPathsSet = new Set(configPaths.map(nfc));
 
         // 添加 LocalStorage 虚拟路径
         const storageConfigs = await plugin.localStorageManager.getStorageConfigs();
@@ -1123,9 +1140,10 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
         }
 
         for (const path of trackedConfigPaths) {
-          if (configIsPathExcluded(path, plugin)) continue;
-          if (!localConfigPathsSet.has(path)) {
-            delConfigs.push({ path: path, pathHash: hashContent(path) });
+          const p = nfc(path);
+          if (configIsPathExcluded(p, plugin)) continue;
+          if (!localConfigPathsSet.has(p)) {
+            delConfigs.push({ path: p, pathHash: hashContent(p) });
           }
         }
       }
@@ -1133,7 +1151,8 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
       // 增量同步且未开启离线删除同步：检测缺失的配置文件
       if (plugin.configHashManager && plugin.configHashManager.isReady()) {
         const trackedConfigPaths = plugin.configHashManager.getAllPaths();
-        const localConfigPathsSet = new Set(configPaths);
+        // 本地路径统一 NFC 规范化后再比较（见 nfc() 注释）
+        const localConfigPathsSet = new Set(configPaths.map(nfc));
 
         // 添加 LocalStorage 虚拟路径
         const storageConfigs = await plugin.localStorageManager.getStorageConfigs();
@@ -1142,9 +1161,10 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
         }
 
         for (const path of trackedConfigPaths) {
-          if (configIsPathExcluded(path, plugin)) continue;
-          if (!localConfigPathsSet.has(path)) {
-            missingConfigs.push({ path: path, pathHash: hashContent(path) });
+          const p = nfc(path);
+          if (configIsPathExcluded(p, plugin)) continue;
+          if (!localConfigPathsSet.has(p)) {
+            missingConfigs.push({ path: p, pathHash: hashContent(p) });
           }
         }
       }

@@ -1,7 +1,7 @@
 import { TFile, TAbstractFile, normalizePath } from "obsidian";
 
 import { ReceiveMessage, ReceiveMtimeMessage, ReceivePathMessage, SyncEndData } from "../utils/types";
-import { hashContent, hashContentAsync, dump, dumpError, isPathExcluded, getSafeCtime, vaultDelete, checkAndNotifyCaseConflict, getPluginDir } from "../utils/helpers";
+import { hashContent, hashContentAsync, dump, dumpError, isPathExcluded, getSafeCtime, vaultDelete, checkAndNotifyCaseConflict, getPluginDir, nfc } from "../utils/helpers";
 import { SyncLogManager } from "./sync_log_manager";
 import type FastSync from "../../main";
 
@@ -20,11 +20,13 @@ export const noteModify = async function (file: TAbstractFile, plugin: FastSync,
     plugin.addIgnoredFile(file.path)
 
     try {
-      const baseHash = plugin.fileHashManager.getPathHash(file.path)
-      const lastSyncMtime = plugin.lastSyncMtime.get(file.path)
+      // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）；vault.read(file) 用 TFile 对象不受影响
+      const p = nfc(file.path)
+      const baseHash = plugin.fileHashManager.getPathHash(p)
+      const lastSyncMtime = plugin.lastSyncMtime.get(p)
 
       // --- 优化：先尝试从缓存获取有效哈希 ---
-      let contentHash = plugin.fileHashManager.getValidHash(file.path, file.stat.mtime, file.stat.size);
+      let contentHash = plugin.fileHashManager.getValidHash(p, file.stat.mtime, file.stat.size);
       let content: string | null = null;
 
       if (contentHash !== null) {
@@ -45,8 +47,8 @@ export const noteModify = async function (file: TAbstractFile, plugin: FastSync,
         vault: plugin.settings.vault,
         ctime: getSafeCtime(file.stat),
         mtime: file.stat.mtime,
-        path: file.path,
-        pathHash: hashContent(file.path),
+        path: p,
+        pathHash: hashContent(p),
         content: content,
         contentHash: contentHash,
         // 始终传递 baseHash 信息，如果不可用则标记 baseHashMissing
@@ -57,8 +59,8 @@ export const noteModify = async function (file: TAbstractFile, plugin: FastSync,
       if (contentHash != baseHash) {
         // 新建操作覆盖删除意图，清除 pending 防止晚到的 Ack 错误删除新文件 hash
         // New create supersedes delete intent; clear pending to prevent stale Ack from removing new hash
-        plugin.pendingNoteDeleteAcks.delete(file.path)
-        plugin.pendingNoteModifies.set(file.path, contentHash)
+        plugin.pendingNoteDeleteAcks.delete(p)
+        plugin.pendingNoteModifies.set(p, contentHash)
         plugin.localStorageManager.savePending('pendingNoteModifies', plugin.pendingNoteModifies)
       }
       if (!await plugin.concurrencyLimiter.waitForSlot(file.path)) return
@@ -80,8 +82,11 @@ export const noteDelete = async function (file: TAbstractFile, plugin: FastSync,
   if (eventEnter && plugin.isIgnoredFile(file.path)) return
   if (isPathExcluded(file.path, plugin)) return
 
+  // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）
+  const p = nfc(file.path)
+
   // --- 新增：删除拦截 ---
-  if (plugin.lastSyncPathDeleted.has(file.path)) {
+  if (plugin.lastSyncPathDeleted.has(p)) {
     dump(`Note delete intercepted: ${file.path}`)
     return
   }
@@ -89,20 +94,20 @@ export const noteDelete = async function (file: TAbstractFile, plugin: FastSync,
   await plugin.lockManager.withLock(file.path, async () => {
     // 清理可能存在的待确认上传记录，避免 pending map 内存泄漏
     // Clean up any pending note modify record to avoid memory leak
-    plugin.pendingNoteModifies.delete(file.path)
+    plugin.pendingNoteModifies.delete(p)
     plugin.localStorageManager.savePending('pendingNoteModifies', plugin.pendingNoteModifies)
     plugin.addIgnoredFile(file.path)
     try {
       const data = {
         vault: plugin.settings.vault,
-        path: file.path,
-        pathHash: hashContent(file.path),
+        path: p,
+        pathHash: hashContent(p),
       }
       if (!await plugin.concurrencyLimiter.waitForSlot(file.path)) return
       void plugin.websocket.SendMessage("NoteDelete", data, undefined, () => {
         // 消息真正写入 TCP 缓冲区后加入 pending set，等待 NoteDeleteAck 再删 hash
         // Add to pending set only after message is actually buffered; remove hash only on NoteDeleteAck
-        plugin.pendingNoteDeleteAcks.add(file.path)
+        plugin.pendingNoteDeleteAcks.add(p)
       })
 
       dump(`Note delete send`, file.path)
@@ -120,24 +125,26 @@ export const noteDeleteByPath = async function (filePath: string, plugin: FastSy
   if (plugin.settings.syncEnabled == false || plugin.settings.readonlySyncEnabled) return
   if (!filePath.endsWith(".md")) return
   if (isPathExcluded(filePath, plugin)) return
-  if (plugin.lastSyncPathDeleted.has(filePath)) return
+  // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）
+  const p = nfc(filePath)
+  if (plugin.lastSyncPathDeleted.has(p)) return
 
   await plugin.lockManager.withLock(filePath, async () => {
     // 清理可能存在的待确认上传记录，避免 pending map 内存泄漏
     // Clean up any pending note modify record to avoid memory leak
-    plugin.pendingNoteModifies.delete(filePath)
+    plugin.pendingNoteModifies.delete(p)
     plugin.localStorageManager.savePending('pendingNoteModifies', plugin.pendingNoteModifies)
     plugin.addIgnoredFile(filePath)
     try {
       if (!await plugin.concurrencyLimiter.waitForSlot(filePath)) return
       void plugin.websocket.SendMessage("NoteDelete", {
         vault: plugin.settings.vault,
-        path: filePath,
-        pathHash: hashContent(filePath),
+        path: p,
+        pathHash: hashContent(p),
       }, undefined, () => {
         // 消息真正写入 TCP 缓冲区后加入 pending set，等待 NoteDeleteAck 再删 hash
         // Add to pending set only after message is actually buffered; remove hash only on NoteDeleteAck
-        plugin.pendingNoteDeleteAcks.add(filePath)
+        plugin.pendingNoteDeleteAcks.add(p)
       })
       dump(`Note delete by path send`, filePath)
     } finally {
@@ -177,8 +184,12 @@ export const noteRename = async function (file: TAbstractFile, oldfile: string, 
     return
   }
 
+  // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）
+  const p = nfc(file.path)
+  const oldP = nfc(oldfile)
+
   // --- 新增：重命名拦截 ---
-  if (plugin.lastSyncPathRenamed.has(file.path)) {
+  if (plugin.lastSyncPathRenamed.has(p)) {
     dump(`Note rename intercepted: ${file.path}`)
     return
   }
@@ -187,7 +198,7 @@ export const noteRename = async function (file: TAbstractFile, oldfile: string, 
   await plugin.lockManager.withLock(file.path, async () => {
     plugin.addIgnoredFile(file.path)
     try {
-      let contentHash = plugin.fileHashManager.getPathHash(oldfile)
+      let contentHash = plugin.fileHashManager.getPathHash(oldP)
       if (contentHash == null) {
         const content: string = await plugin.app.vault.read(file)
         contentHash = await hashContentAsync(content)
@@ -195,15 +206,15 @@ export const noteRename = async function (file: TAbstractFile, oldfile: string, 
 
       const data = {
         vault: plugin.settings.vault,
-        path: file.path,
-        pathHash: hashContent(file.path),
-        oldPath: oldfile,
-        oldPathHash: hashContent(oldfile),
+        path: p,
+        pathHash: hashContent(p),
+        oldPath: oldP,
+        oldPathHash: hashContent(oldP),
       }
 
       // 将重命名信息存入 Map（key 为 newPath），等待服务端 NoteRenameAck 按 path 精确匹配后再更新 hashManager
       // Store rename info in Map (keyed by newPath), update hashManager only after server NoteRenameAck matches by path
-      plugin.pendingNoteRenames.set(file.path, { oldPath: oldfile, newPath: file.path, contentHash })
+      plugin.pendingNoteRenames.set(p, { oldPath: oldP, newPath: p, contentHash })
       if (!await plugin.concurrencyLimiter.waitForSlot(file.path, true)) return
       void plugin.websocket.SendMessage("NoteRename", data)
       dump(`Note rename send`, data.path, data.pathHash)
@@ -387,7 +398,8 @@ export const receiveNoteUpload = async function (data: ReceivePathMessage, plugi
   // record the owning page by path here so the Ack can look it up on arrival (see sync_state.ts
   // pendingNotePushPageIndex comment)
   if (data.pageIndex !== undefined) {
-    plugin.syncState.pendingNotePushPageIndex.set(file.path, data.pageIndex)
+    // Ack 按入站 path（NFC）查表，本地键需同形（见 nfc() 注释）
+    plugin.syncState.pendingNotePushPageIndex.set(nfc(file.path), data.pageIndex)
   }
 
   plugin.addIgnoredFile(file.path)
@@ -402,12 +414,15 @@ export const receiveNoteUpload = async function (data: ReceivePathMessage, plugi
     dump(`Empty note upload: ${data.path}`);
   }
 
+  // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）：服务端按此 path 回发 Ack，
+  // 两端必须同形才能匹配
+  const p = nfc(file.path)
   const sendData = {
     vault: plugin.settings.vault,
     ctime: getSafeCtime(file.stat),
     mtime: file.stat.mtime,
-    path: file.path,
-    pathHash: hashContent(file.path),
+    path: p,
+    pathHash: hashContent(p),
     content: content,
     contentHash: contentHash,
     // 始终传递 baseHash 信息，如果不可用则标记 baseHashMissing
@@ -417,7 +432,7 @@ export const receiveNoteUpload = async function (data: ReceivePathMessage, plugi
   // 若此路径已有旧 pending（来自中断的 noteModify），覆盖为最新 hash
   // Store hash in pending map; hashManager is written only after NoteModifyAck arrives.
   // Overwrites any stale pending entry left by a previously interrupted noteModify.
-  plugin.pendingNoteModifies.set(file.path, contentHash)
+  plugin.pendingNoteModifies.set(p, contentHash)
   plugin.localStorageManager.savePending('pendingNoteModifies', plugin.pendingNoteModifies)
   if (!await plugin.concurrencyLimiter.waitForSlot(file.path)) {
     plugin.removeIgnoredFile(file.path)

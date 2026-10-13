@@ -1,6 +1,6 @@
 import { Plugin, Platform, addIcon } from "obsidian";
 
-import { dump, dumpError, checkAndNotifyCaseConflict, setLogEnabled, isPathMatch, parseRules, stringifyRules, getPluginDir, showSyncNotice, loadApiToken, saveApiToken, loadApiUrl, saveApiUrl, loadVault, saveVault, loadAutoRedirect, saveAutoRedirect, loadWsPreProbe, saveWsPreProbe, obfuscateToken } from "./lib/utils/helpers";
+import { dump, dumpError, checkAndNotifyCaseConflict, setLogEnabled, isPathMatch, parseRules, stringifyRules, getPluginDir, showSyncNotice, loadApiToken, saveApiToken, loadApiUrl, saveApiUrl, loadVault, saveVault, loadAutoRedirect, saveAutoRedirect, loadWsPreProbe, saveWsPreProbe, obfuscateToken, nfc } from "./lib/utils/helpers";
 import { clearAllTempChunks, abortAllFileOperations, resetFileOperations } from "./lib/sync/operator_file";
 import { SettingTab, PluginSettings, DEFAULT_SETTINGS } from "./setting";
 import { SyncLogView, SYNC_LOG_VIEW_TYPE } from "./views/sync-log-view";
@@ -311,27 +311,40 @@ export default class FastSync extends Plugin {
   }
 
   addIgnoredFile(path: string) {
-    this.ignoredFiles.add(path)
+    // 键统一 NFC 规范化，保证与 isIgnoredFile 的查询形式一致（见 nfc() 注释）
+    this.ignoredFiles.add(nfc(path))
   }
 
   removeIgnoredFile(path: string) {
-    this.ignoredFiles.delete(path)
+    const key = nfc(path)
+    this.ignoredFiles.delete(key)
+    // 清理同一视觉路径的旧 Unicode 形式键（NFD→NFC 迁移后的残留）
+    if (key !== path) this.ignoredFiles.delete(path)
   }
 
   isIgnoredFile(path: string): boolean {
-    if (this.ignoredFiles.has(path)) return true
+    const p = nfc(path)
+    if (this.ignoredFiles.has(p)) return true
     for (const ignoredPath of this.ignoredFiles) {
-      if (isPathMatch(path, ignoredPath)) return true
+      if (isPathMatch(p, ignoredPath)) return true
     }
     return false
   }
 
   addIgnoredConfigFile(path: string) {
-    this.ignoredConfigFiles.add(path)
+    // 键统一 NFC 规范化，保证与 isIgnoredConfigFile 的查询形式一致（见 nfc() 注释）
+    this.ignoredConfigFiles.add(nfc(path))
   }
 
   removeIgnoredConfigFile(path: string) {
-    this.ignoredConfigFiles.delete(path)
+    const key = nfc(path)
+    this.ignoredConfigFiles.delete(key)
+    // 清理同一视觉路径的旧 Unicode 形式键（NFD→NFC 迁移后的残留）
+    if (key !== path) this.ignoredConfigFiles.delete(path)
+  }
+
+  isIgnoredConfigFile(path: string): boolean {
+    return this.ignoredConfigFiles.has(nfc(path))
   }
 
   updateRibbonIcon(status: boolean) {
