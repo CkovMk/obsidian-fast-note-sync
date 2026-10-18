@@ -1,3 +1,4 @@
+import { blockAliasedRemoteMutation } from "./remote_path_guard";
 import { TFile, TAbstractFile, normalizePath } from "obsidian";
 
 import { ReceiveMessage, ReceiveMtimeMessage, ReceivePathMessage, SyncEndData } from "../utils/types";
@@ -500,6 +501,7 @@ export const receiveNoteSyncDelete = async function (data: ReceiveMessage, plugi
     await plugin.lockManager.withLock(normalizedPath, async () => {
       const file = plugin.app.vault.getFileByPath(normalizedPath)
       if (file instanceof TFile) {
+        if (blockAliasedRemoteMutation(plugin, file, data.path, "NoteDelete")) return
         plugin.addIgnoredFile(normalizedPath)
         // 记录待删除路径，用于拦截本地删除事件
         plugin.lastSyncPathDeleted.add(normalizedPath)
@@ -574,6 +576,8 @@ export const receiveNoteSyncRename = async function (data: { path: string, oldPa
     await plugin.lockManager.withLock(normalizedNewPath, async () => {
       const file = plugin.app.vault.getFileByPath(normalizedOldPath)
       if (file instanceof TFile) {
+        if (blockAliasedRemoteMutation(plugin, file, data.oldPath, "NoteRename")) return
+        if (blockAliasedRemoteMutation(plugin, plugin.app.vault.getFileByPath(normalizedNewPath), data.path, "NoteRename")) return
         plugin.addIgnoredFile(normalizedNewPath)
         plugin.addIgnoredFile(normalizedOldPath)
 
