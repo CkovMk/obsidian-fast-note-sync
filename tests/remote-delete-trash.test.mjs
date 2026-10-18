@@ -20,6 +20,7 @@ function load(file) {
   vm.runInNewContext(code, { module, exports: module.exports, console,
     window: { setTimeout: fn => { fn(); return 1; } },
     require: id => id === 'obsidian' ? { TFile, TFolder, normalizePath: x => x.replace(/\\/g, '/') }
+      : id === './remote_path_guard' ? load('src/lib/sync/remote_path_guard.ts')
       : id.includes('helpers_obsidian_bypass') ? { ...helpers, vaultDelete: forbidden }
       : id.includes('helpers') ? { ...helpers, vaultDelete: forbidden }
       : id.includes('sync_log_manager') ? { SyncLogManager: { getInstance: () => ({ addLog: noop }) } }
