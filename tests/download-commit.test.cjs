@@ -16,13 +16,13 @@ vm.runInNewContext(transpiled,{module:m,exports:m.exports,console,Uint8Array,Arr
 }});
 function fixture(){
  const files=new Map([['example.bin',new TFile('example.bin')]]),writes=[],cache=[],meta=new Map();
- const plugin={settings:{syncEnabled:true,cloudPreviewEnabled:false},syncState:{activeSyncContext:'ctx',pendingFilePushPageIndex:new Map()},pendingUploadHashes:new Map(),pendingDeleteFilePaths:new Set(),pendingFileDeleteAcks:new Set(),fileDownloadSessions:new Map(),lastSyncMtime:new Map(),downloadedFilesCount:0,
+ const plugin={progressTracker:{recordDownloadComplete:noop},settings:{syncEnabled:true,cloudPreviewEnabled:false},syncState:{activeSyncContext:'ctx',pendingFilePushPageIndex:new Map()},pendingUploadHashes:new Map(),pendingDeleteFilePaths:new Set(),pendingFileDeleteAcks:new Set(),fileDownloadSessions:new Map(),lastSyncMtime:new Map(),downloadedFilesCount:0,
   app:{vault:{getFileByPath:p=>files.get(p),getFolderByPath:()=>({}),createFolder:async()=>{},readBinary:async f=>Uint8Array.from(f.bytes).buffer,modifyBinary:async(f,b,o)=>{f.bytes=[...new Uint8Array(b)];Object.assign(f.stat,o,{size:b.byteLength});writes.push({kind:'modify',bytes:f.bytes});},createBinary:async(p,b,o)=>{const f=new TFile(p);f.bytes=[...new Uint8Array(b)];Object.assign(f.stat,o,{size:b.byteLength});files.set(p,f);writes.push({kind:'create',bytes:f.bytes});}}},
   lockManager:{withLock:async(_p,fn)=>fn()},addIgnoredFile:noop,removeIgnoredFile:noop,localStorageManager:{getMetadata:k=>meta.get(k)||0,setMetadata:(k,v)=>meta.set(k,v)},fileHashManager:{setFileHash:(...x)=>cache.push(x)},concurrencyLimiter:{releaseSlot:noop},recordSyncCompleted:noop,fileSyncTasks:{failed:0}};
  const session=async(id,byte)=>{const s={commitGuard:await m.exports.testCapture(plugin,'example.bin'),path:'example.bin',sessionId:id,contentHash:String(byte),ctime:1,mtime:50,lastTime:1000,size:1,totalChunks:1,chunks:new Map([[0,Uint8Array.from([byte]).buffer]]),pageIndex:1};plugin.fileDownloadSessions.set(id,s);return s;};
  return{plugin,files,writes,cache,session,view:()=>({bytes:files.get('example.bin')?.bytes??null,mtime:files.get('example.bin')?.stat.mtime??null,exists:files.has('example.bin')})};
 }
-const results=[];async function run(name,setup,expect){const f=fixture();await setup(f);const actual=f.view();results.push({name,actual,expected:expect,protectionPassed:JSON.stringify(actual)===JSON.stringify(expect),writes:f.writes});}
+const results=[];async function run(name,setup,expect){const f=fixture();await setup(f);const actual=f.view();const normal=name.startsWith('normal')||name.startsWith('uncontested');assert.equal(f.plugin.fileSyncTasks.failed,normal?0:1,name+' failure accounting');assert.equal(f.cache.length,(normal||name.startsWith('older session'))?1:0,name+' acknowledged hash must only advance on commit');results.push({name,actual,expected:expect,protectionPassed:JSON.stringify(actual)===JSON.stringify(expect),writes:f.writes});}
 (async()=>{
  await run('normal download control',async f=>m.exports.testComplete(await f.session('a',2),f.plugin),{bytes:[2],mtime:50,exists:true});
  await run('unsent local edit during download',async f=>{const s=await f.session('a',2);f.files.get('example.bin').bytes=[9];f.files.get('example.bin').stat.mtime=200;f.plugin.pendingUploadHashes.set('example.bin','9');await m.exports.testComplete(s,f.plugin);},{bytes:[9],mtime:200,exists:true});
@@ -32,6 +32,7 @@ const results=[];async function run(name,setup,expect){const f=fixture();await s
  await run('sync disabled while finalizer awaiting commit',async f=>{const a=await f.session('a',2);f.plugin.settings.syncEnabled=false;await m.exports.testComplete(a,f.plugin);},{bytes:[0],mtime:100,exists:true});
  await run('same-stat local byte change',async f=>{const a=await f.session('a',2);f.files.get('example.bin').bytes=[9];await m.exports.testComplete(a,f.plugin);},{bytes:[9],mtime:100,exists:true});
  await run('disconnect invalidates retained session',async f=>{const a=await f.session('a',2);m.exports.invalidateFileDownloads(f.plugin);await m.exports.testComplete(a,f.plugin);},{bytes:[0],mtime:100,exists:true});
+ await run('disabled while waiting for the path lock',async f=>{const a=await f.session('a',2);f.plugin.lockManager.withLock=async(_p,fn)=>{f.plugin.settings.syncEnabled=false;return fn();};await m.exports.testComplete(a,f.plugin);},{bytes:[0],mtime:100,exists:true});
  await run('uncontested absent file downloads',async f=>{f.files.clear();await m.exports.testComplete(await f.session('a',2),f.plugin);},{bytes:[2],mtime:50,exists:true});
  assert.equal(results[0].protectionPassed,true,'control must work');
  for(const r of results)assert.equal(r.protectionPassed,true,r.name);
