@@ -90,6 +90,14 @@ export interface FileSyncChunkDownloadMessage {
 }
 
 export interface FileDownloadSession {
+    commitGuard?: {
+        owner: object;
+        epoch: number;
+        file: import("obsidian").TFile | null;
+        mtime?: number;
+        size?: number;
+        hash?: string;
+    };
     path: string;
     contentHash?: string;
     ctime: number;
