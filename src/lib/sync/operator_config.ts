@@ -1,6 +1,6 @@
 import { normalizePath, App } from "obsidian";
 
-import { hashContent, dump, dumpError, configIsPathExcluded, getSafeCtime, isPathInConfigSyncDirs, showSyncNotice, isInWhitelist, hashFileAsync, checkAndNotifyCaseConflict } from "../utils/helpers";
+import { hashContent, dump, dumpError, configIsPathExcluded, getSafeCtime, isPathInConfigSyncDirs, showSyncNotice, isInWhitelist, hashFileAsync, checkAndNotifyCaseConflict, nfc } from "../utils/helpers";
 import { SyncLogManager } from "./sync_log_manager";
 import { ReceiveMessage, ReceiveMtimeMessage, ReceivePathMessage, SyncEndData } from "../utils/types";
 import type FastSync from "../../main";
@@ -38,7 +38,7 @@ export const cleanupConfigReloadTimer = function (): void {
 export const configModify = async function (path: string, plugin: FastSync, eventEnter: boolean = false, content?: string) {
     if (plugin.settings.configSyncEnabled == false || plugin.settings.readonlySyncEnabled) return
     if (!isPathInConfigSyncDirs(path, plugin)) return
-    if (eventEnter && plugin.ignoredConfigFiles.has(path)) return
+    if (eventEnter && plugin.isIgnoredConfigFile(path)) return
     if (configIsPathExcluded(path, plugin)) return
 
     // 如果是文件系统事件（无 content），拦截 LocalStorage 虚拟路径
@@ -84,8 +84,10 @@ export const configModify = async function (path: string, plugin: FastSync, even
     // --- 新增：哈希校验 ---
     // 如果当前内容哈希与已记录的哈希一致，则说明无需发送
     // 这通常发生在接收到服务端更新并写入本地后，文件系统事件触发的回调中
-    const savedHash = plugin.configHashManager?.getPathHash(path)
-    const lastSyncMtime = plugin.lastSyncMtime.get(path)
+    // 协议字段/Map 键统一 NFC 规范化（见 nfc() 注释）；adapter I/O 仍用原始本地路径
+    const p = nfc(path)
+    const savedHash = plugin.configHashManager?.getPathHash(p)
+    const lastSyncMtime = plugin.lastSyncMtime.get(p)
 
     if (savedHash === contentHash && (lastSyncMtime !== undefined && lastSyncMtime === mtime)) {
         plugin.removeIgnoredConfigFile(path)
@@ -99,8 +101,8 @@ export const configModify = async function (path: string, plugin: FastSync, even
 
     const data = {
         vault: plugin.settings.vault,
-        path: path,
-        pathHash: hashContent(path),
+        path: p,
+        pathHash: hashContent(p),
         content: contentStr,
         contentHash: contentHash,
         mtime: mtime,
@@ -108,8 +110,8 @@ export const configModify = async function (path: string, plugin: FastSync, even
     }
     // 将 hash 暂存到 pending map，等待服务端 SettingModifyAck 后再写入 configHashManager
     // Temporarily store hash in pending map, update configHashManager only after server SettingModifyAck
-    plugin.pendingConfigDeleteAcks.delete(path)
-    plugin.pendingConfigModifies.set(path, contentHash)
+    plugin.pendingConfigDeleteAcks.delete(p)
+    plugin.pendingConfigModifies.set(p, contentHash)
     plugin.localStorageManager.savePending('pendingConfigModifies', plugin.pendingConfigModifies)
     if (!await plugin.concurrencyLimiter.waitForSlot(path)) {
         plugin.removeIgnoredConfigFile(path)
@@ -123,11 +125,14 @@ export const configModify = async function (path: string, plugin: FastSync, even
 export const configDelete = async function (path: string, plugin: FastSync, eventEnter: boolean = false) {
     if (plugin.settings.configSyncEnabled == false || plugin.settings.readonlySyncEnabled) return
     if (!isPathInConfigSyncDirs(path, plugin)) return
-    if (eventEnter && plugin.ignoredConfigFiles.has(path)) return
+    if (eventEnter && plugin.isIgnoredConfigFile(path)) return
     if (configIsPathExcluded(path, plugin)) return
 
+    // 出站路径/本地 Map 键统一 NFC 规范化（见 nfc() 注释）
+    const p = nfc(path)
+
     // --- 新增：删除拦截 ---
-    if (plugin.lastSyncPathDeleted.has(path)) {
+    if (plugin.lastSyncPathDeleted.has(p)) {
         dump(`Config delete intercepted: ${path}`)
         return
     }
@@ -135,8 +140,8 @@ export const configDelete = async function (path: string, plugin: FastSync, even
     plugin.addIgnoredConfigFile(path)
     const data = {
         vault: plugin.settings.vault,
-        path: path,
-        pathHash: hashContent(path),
+        path: p,
+        pathHash: hashContent(p),
     }
     if (!await plugin.concurrencyLimiter.waitForSlot(path)) {
         plugin.removeIgnoredConfigFile(path)
@@ -145,7 +150,7 @@ export const configDelete = async function (path: string, plugin: FastSync, even
     void plugin.websocket.SendMessage("SettingDelete", data, undefined, () => {
         // 消息真正写入 TCP 缓冲区后加入 pending set，等待 SettingDeleteAck 再删 hash
         // Add to pending set only after message is actually buffered; remove hash only on SettingDeleteAck
-        plugin.pendingConfigDeleteAcks.add(path)
+        plugin.pendingConfigDeleteAcks.add(p)
     })
     plugin.removeIgnoredConfigFile(path)
 }
@@ -164,7 +169,7 @@ export const receiveConfigSyncModify = async function (data: ReceiveMessage, plu
         plugin.recordSyncCompleted('setting', data.pageIndex)
         return
     }
-    if (plugin.ignoredConfigFiles.has(data.path)) {
+    if (plugin.isIgnoredConfigFile(data.path)) {
         plugin.recordSyncCompleted('setting', data.pageIndex)
         return
     }
@@ -361,7 +366,7 @@ export const receiveConfigSyncMtime = async function (data: ReceiveMtimeMessage,
         plugin.recordSyncCompleted('setting', data.pageIndex)
         return
     }
-    if (plugin.ignoredConfigFiles.has(data.path)) {
+    if (plugin.isIgnoredConfigFile(data.path)) {
         plugin.recordSyncCompleted('setting', data.pageIndex)
         return
     }
@@ -402,7 +407,7 @@ export const receiveConfigSyncDelete = async function (data: { path: string, las
         plugin.recordSyncCompleted('setting', data.pageIndex)
         return
     }
-    if (plugin.ignoredConfigFiles.has(data.path)) {
+    if (plugin.isIgnoredConfigFile(data.path)) {
         plugin.recordSyncCompleted('setting', data.pageIndex)
         return
     }

@@ -2,7 +2,7 @@ import { blockAliasedRemoteMutation } from "./remote_path_guard";
 import { TFolder, normalizePath } from "obsidian";
 
 import { SyncEndData, FolderSyncRenameMessage } from "../utils/types";
-import { hashContent, dump, dumpError, isFolderSyncPathExcluded, waitForFolderEmpty, checkAndNotifyCaseConflict } from "../utils/helpers";
+import { hashContent, dump, dumpError, isFolderSyncPathExcluded, waitForFolderEmpty, checkAndNotifyCaseConflict, nfc } from "../utils/helpers";
 import { SyncLogManager } from "./sync_log_manager";
 import type FastSync from "../../main";
 
@@ -18,14 +18,16 @@ export const folderModify = async function (folder: TFolder, plugin: FastSync, e
     await plugin.lockManager.withLock(folder.path, async () => {
         plugin.addIgnoredFile(folder.path)
         try {
+            // 出站路径统一 NFC 规范化（见 nfc() 注释）
+            const p = nfc(folder.path);
             const now = Date.now();
             const data = {
                 vault: plugin.settings.vault,
-                path: folder.path,
-                pathHash: hashContent(folder.path),
+                path: p,
+                pathHash: hashContent(p),
             }
             void plugin.websocket.SendMessage("FolderModify", data, undefined, () => {
-                plugin.folderSnapshotManager.setFolderMtime(folder.path, now)
+                plugin.folderSnapshotManager.setFolderMtime(p, now)
             })
             dump(`Folder modify send`, data.path, data.pathHash)
         } finally {
@@ -42,8 +44,11 @@ export const folderDelete = async function (folder: TFolder, plugin: FastSync, e
     if (eventEnter && plugin.isIgnoredFile(folder.path)) return
     if (isFolderSyncPathExcluded(folder.path, plugin)) return
 
+    // 出站路径统一 NFC 规范化（见 nfc() 注释）
+    const p = nfc(folder.path)
+
     // --- 新增：删除拦截 ---
-    if (plugin.lastSyncPathDeleted.has(folder.path)) {
+    if (plugin.lastSyncPathDeleted.has(p)) {
         dump(`Folder delete intercepted: ${folder.path}`)
         return
     }
@@ -53,11 +58,11 @@ export const folderDelete = async function (folder: TFolder, plugin: FastSync, e
         try {
             const data = {
                 vault: plugin.settings.vault,
-                path: folder.path,
-                pathHash: hashContent(folder.path),
+                path: p,
+                pathHash: hashContent(p),
             }
             void plugin.websocket.SendMessage("FolderDelete", data, undefined, () => {
-                plugin.folderSnapshotManager.removeFolder(folder.path)
+                plugin.folderSnapshotManager.removeFolder(p)
             })
             dump(`Folder delete send`, folder.path)
         } finally {
@@ -73,18 +78,20 @@ export const folderDelete = async function (folder: TFolder, plugin: FastSync, e
 export const folderDeleteByPath = async function (folderPath: string, plugin: FastSync) {
     if (plugin.settings.syncEnabled == false || plugin.settings.readonlySyncEnabled) return
     if (isFolderSyncPathExcluded(folderPath, plugin)) return
-    if (plugin.lastSyncPathDeleted.has(folderPath)) return
+    // 出站路径统一 NFC 规范化（见 nfc() 注释）
+    const p = nfc(folderPath)
+    if (plugin.lastSyncPathDeleted.has(p)) return
 
     await plugin.lockManager.withLock(folderPath, async () => {
         plugin.addIgnoredFile(folderPath)
         try {
             const data = {
                 vault: plugin.settings.vault,
-                path: folderPath,
-                pathHash: hashContent(folderPath),
+                path: p,
+                pathHash: hashContent(p),
             }
             void plugin.websocket.SendMessage("FolderDelete", data, undefined, () => {
-                plugin.folderSnapshotManager.removeFolder(folderPath)
+                plugin.folderSnapshotManager.removeFolder(p)
             })
             dump('Folder delete by path send', folderPath)
         } finally {
@@ -122,8 +129,12 @@ export const folderRename = async function (folder: TFolder, oldPath: string, pl
         return
     }
 
+    // 出站路径统一 NFC 规范化（见 nfc() 注释）
+    const p = nfc(folder.path)
+    const oldP = nfc(oldPath)
+
     // --- 新增：重命名拦截 ---
-    if (plugin.lastSyncPathRenamed.has(folder.path)) {
+    if (plugin.lastSyncPathRenamed.has(p)) {
         dump(`Folder rename intercepted: ${folder.path}`)
         return
     }
@@ -134,14 +145,14 @@ export const folderRename = async function (folder: TFolder, oldPath: string, pl
             const now = Date.now();
             const data = {
                 vault: plugin.settings.vault,
-                path: folder.path,
-                pathHash: hashContent(folder.path),
-                oldPath: oldPath,
-                oldPathHash: hashContent(oldPath),
+                path: p,
+                pathHash: hashContent(p),
+                oldPath: oldP,
+                oldPathHash: hashContent(oldP),
             }
             void plugin.websocket.SendMessage("FolderRename", data, undefined, () => {
-                plugin.folderSnapshotManager.removeFolder(oldPath)
-                plugin.folderSnapshotManager.setFolderMtime(folder.path, now)
+                plugin.folderSnapshotManager.removeFolder(oldP)
+                plugin.folderSnapshotManager.setFolderMtime(p, now)
             })
             dump(`Folder rename send`, data.path, data.pathHash)
         } finally {

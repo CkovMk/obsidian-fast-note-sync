@@ -1,4 +1,4 @@
-import { dump, sleep } from "../utils/helpers";
+import { dump, sleep, nfc } from "../utils/helpers";
 
 
 export class LockManager {
@@ -18,6 +18,8 @@ export class LockManager {
      * @param retryInterval 重试间隔(ms)
      */
     private async tryAcquire(key: string, retryCount: number = 0, maxRetries: number = 10, retryInterval: number = 50): Promise<boolean> {
+        // 锁键统一 NFC 规范化，避免同一文件以 NFD/NFC 两种形式拿到两把锁（见 nfc() 注释）
+        key = nfc(key);
         let acquired = false;
 
         if (this.fallbackLocks && !this.fallbackLocks.has(key)) {
@@ -42,8 +44,9 @@ export class LockManager {
      * 释放锁
      */
     private release(key: string) {
+        // 与 tryAcquire 保持一致：键先 NFC 规范化再删除（见 nfc() 注释）
         if (this.fallbackLocks) {
-            this.fallbackLocks.delete(key);
+            this.fallbackLocks.delete(nfc(key));
         }
     }
 

@@ -10,14 +10,17 @@ class TFolder { constructor(path) { this.path = path; this.children = []; } }
 // Model Obsidian's space folding and NFC conversion before a vault lookup.
 const normalizePath = p => p.replace(/\\/g, "/").replace(/\u00a0|\u202f/g, " ").normalize("NFC");
 let logs = [], empty = true, onWait = () => {};
-const logger = { getInstance: () => ({ addLog: (...args) => logs.push(args) }) };
+const logger = { getInstance: () => ({ addLog: (...args) => logs.push(args), logReceivedMessage() {} }) };
 const helpers = new Proxy({
+  nfc: p => p.normalize("NFC"),
   isPathExcluded: () => false,
   isFolderSyncPathExcluded: () => false,
   vaultDelete: (vault, file) => vault.trash(file),
   waitForFolderEmpty: async () => { onWait(); return empty; },
 }, { get: (target, name) => target[name] ?? (() => undefined) });
 const cache = new Map();
+const actions = new Proxy({}, { get: (_, key) => key });
+const receiveOperators = new Map();
 function load(name) {
   if (cache.has(name)) return cache.get(name);
   const source = fs.readFileSync(path.join(root, `src/lib/sync/${name}.ts`), "utf8");
@@ -31,10 +34,13 @@ function load(name) {
     require(id) {
       if (id === "obsidian") return { TFile, TFolder, normalizePath, Platform: { isMobile: false } };
       if (id === "./remote_path_guard") return load("remote_path_guard");
+      if (id === "./websocket_action") return actions;
+      if (id === "./operator") return { receiveOperators };
       if (id === "./sync_log_manager") return { SyncLogManager: logger };
       if (id === "../utils/helpers") return helpers;
       if (id === "../storage/file_cloud_preview") return { FileCloudPreview: { isRestrictedType: () => false } };
       if (id === "../api/http_api_service") return { HttpApiService: {} };
+      if (name === "websocket_manager") return {};
       throw new Error(`Unexpected import: ${id}`);
     },
   }, { filename: name });
@@ -43,7 +49,7 @@ function load(name) {
 }
 
 let cases = 0;
-async function check(kind, operation, mode, alias = "notes/A\u00a0B.md") {
+async function check(kind, operation, mode, alias = "notes/A\u00a0B.md", dispatch = false) {
   logs = []; empty = mode !== "nonempty";
   const normal = normalizePath(alias), source = "notes/source.md";
   const rawTarget = mode === "rawTarget" || (operation === "Delete" && ["raw", "portableRaw"].includes(mode)) ? alias : normal;
@@ -86,7 +92,22 @@ async function check(kind, operation, mode, alias = "notes/A\u00a0B.md") {
     recordSyncCompleted: (...args) => completed.push(args),
   };
   const handler = load(`operator_${kind}`)[`receive${kind[0].toUpperCase() + kind.slice(1)}Sync${operation}`];
-  await handler({ path: rawTarget, oldPath: rawSource, pageIndex: 7, contentHash: "1" }, plugin);
+  if (dispatch) {
+    plugin.syncState = { activeSyncContext: "round" };
+    const action = `${kind[0].toUpperCase() + kind.slice(1)}Sync${operation}`;
+    let handling;
+    receiveOperators.set(action, (payload, p) => { handling = handler(payload, p); return handling; });
+    const { WebSocketManager } = load("websocket_manager");
+    const manager = Object.create(WebSocketManager.prototype);
+    manager.plugin = plugin;
+    manager.client = { notifyActivity() {} };
+    manager.handleStructuredMessage(action, { code: 200, context: "round", pageIndex: 8,
+      data: { path: rawTarget, oldPath: rawSource, contentHash: "1" } });
+    assert.ok(handling, `handler invoked for ${action}`);
+    await handling;
+  } else {
+    await handler({ path: rawTarget, oldPath: rawSource, pageIndex: 7, contentHash: "1" }, plugin);
+  }
   const blocked = ["raw", "portableRaw", "rawSource", "rawTarget", "physical", "physicalSource", "physicalTarget", "nested", "lateAlias"].includes(mode);
   const skipped = blocked || mode === "nonempty";
   const label = JSON.stringify({ kind, operation, mode, alias });
@@ -122,4 +143,31 @@ await check("folder", "Delete", "nested");
 await check("folder", "Rename", "nested");
 await check("folder", "Delete", "nonempty");
 await check("folder", "Delete", "lateAlias");
+// Test the real WebSocket dispatcher, not only direct handler calls: raw server
+// spellings must survive canonicalization until destructive identity checks.
+for (const kind of ["note", "file", "folder"]) {
+  for (const mode of ["raw", "portableRaw"]) {
+    await check(kind, "Delete", mode, "notes/\u30ab\u3099.md", true);
+  }
+  for (const mode of ["rawSource", "rawTarget", "normal"]) {
+    await check(kind, "Rename", mode, "notes/\u30ab\u3099.md", true);
+  }
+  await check(kind, "Delete", "normal", "notes/\u30ab\u3099.md", true);
+}
+// Download update and chunk responses retain the same exact path, while
+// non-destructive messages continue to use canonical map keys.
+{
+  const { WebSocketManager } = load("websocket_manager");
+  const manager = Object.create(WebSocketManager.prototype);
+  manager.plugin = { settings: {}, syncState: { activeSyncContext: "round" } };
+  manager.client = { notifyActivity() {} };
+  const raw = "files/\u30ab\u3099.bin";
+  for (const action of ["FileSyncUpdate", "FileSyncChunkDownload", "FileSyncMtime"]) {
+    let seen;
+    receiveOperators.set(action, data => { seen = data; });
+    manager.handleStructuredMessage(action, { code: 200, context: "round", data: { path: raw, pathHash: "wire-hash" } });
+    assert.equal(seen.path, action === "FileSyncMtime" ? raw.normalize("NFC") : raw);
+    assert.equal(seen.pathHash, "wire-hash");
+  }
+}
 console.log(`Remote path guard: ${cases} handler cases passed`);

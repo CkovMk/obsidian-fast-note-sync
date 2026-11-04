@@ -148,7 +148,7 @@ export class ConfigManager {
 
   private async checkFileChange(filePath: string, eventEnter: boolean = false, isFolder: boolean = false) {
     const relativePath = filePath
-    if (this.plugin.ignoredConfigFiles.has(relativePath)) return
+    if (this.plugin.isIgnoredConfigFile(relativePath)) return
 
     try {
       const stat = await this.plugin.app.vault.adapter.stat(filePath)

@@ -7,7 +7,7 @@ const noop = () => {};
 class MockFile {}
 const helpers = { dump: noop, dumpError: noop, isPathExcluded: () => false,
   hashContent: x => x, hashContentAsync: async x => x, getPluginDir: () => '.plugin',
-  checkAndNotifyCaseConflict: () => false };
+  checkAndNotifyCaseConflict: () => false, nfc: x => x.normalize('NFC') };
 const logs = { addLog: noop, addOrUpdateLog: noop, logReceivedMessage: noop };
 function load(file, extra = {}, globals = {}) {
   const module = { exports: {} };
