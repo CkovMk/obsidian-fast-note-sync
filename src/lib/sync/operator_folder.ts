@@ -222,7 +222,7 @@ export const receiveFolderSyncDelete = async function (data: { path: string, las
         plugin.recordSyncCompleted('folder', data.pageIndex)
         return
     }
-    dump(`Receive folder delete:`, data.path, data.pathHash)
+    dump(`Receive folder deletion record:`, data.path, data.pathHash)
 
     const normalizedPath = normalizePath(data.path)
 
@@ -248,6 +248,9 @@ export const receiveFolderSyncDelete = async function (data: { path: string, las
                     if (blockAliasedRemoteMutation(plugin, folder, data.path, "FolderDelete")) return
                     plugin.lastSyncPathDeleted.add(normalizedPath)
                     await plugin.app.vault.trash(folder, false)
+                    plugin.folderSyncTasks.deleted = (plugin.folderSyncTasks.deleted ?? 0) + 1
+                    SyncLogManager.getInstance().addLog('receive', 'FolderSyncDelete', undefined, 'success', data.path,
+                        undefined, { skipPersist: true })
                     plugin.folderSnapshotManager.removeFolder(normalizedPath)
                 } finally {
                     window.setTimeout(() => {
@@ -255,6 +258,8 @@ export const receiveFolderSyncDelete = async function (data: { path: string, las
                         plugin.lastSyncPathDeleted.delete(normalizedPath)
                     }, 500);
                 }
+            } else if (!folder) {
+                plugin.folderSyncTasks.alreadyAbsent = (plugin.folderSyncTasks.alreadyAbsent ?? 0) + 1
             }
         }, { maxRetries: 10, retryInterval: 200 });
     } catch (e) {

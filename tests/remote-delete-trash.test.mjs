@@ -46,6 +46,7 @@ function fixture(kind, fail = false) {
       adapter: { exists: async () => true, trashLocal: path => trash(path, false), remove: forbidden } } },
     lockManager: { withLock: async (_, fn) => fn() },
     addIgnoredFile: noop, removeIgnoredFile: noop, ignoredConfigFiles: new Set(),
+    isIgnoredConfigFile: () => false,
     lastSyncPathDeleted: new Set(), lastSyncMtime: new Map(), pendingNoteModifies: new Map(),
     fileHashManager: { removeFileHash: path => removedHashes.push(path) },
     configHashManager: { isReady: () => true, removeFileHash: path => removedHashes.push(path) },

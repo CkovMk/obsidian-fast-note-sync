@@ -268,6 +268,7 @@ export default {
   "ui.status.starting": "同期を開始",
   "ui.status.new_version": "新しいバージョンが見つかりました: ${version}。クリックすると更新ページに移動します",
   "ui.status.completed": "同期完了",
+  "ui.status.completed_no_changes": "同期完了 — 変更なし",
   "ui.status.completed_with_failures": "同期完了、${count}件の失敗あり",
   "ui.status.timeout_partial": "同期タイムアウト、一部のファイルが未完了です。次の同期で続行されます。",
   "ui.status.failed": "同期に失敗しました",
@@ -331,6 +332,7 @@ export default {
   "ui.log.summary.title_cancelled_full": "同期がキャンセルされました (全量)",
   "ui.log.summary.title_cancelled_inc": "同期がキャンセルされました (増分)",
   "ui.log.summary.no_changes": "変更なし",
+  "ui.log.summary.already_absent": "${count} 件の削除レコードを無視しました：ローカルにパスが存在しません（変更なし）。",
 
   // --- ui.log.action ---
   "ui.log.action.VaultScanning_full": "Vaultハッシュ計算進捗(全量)",

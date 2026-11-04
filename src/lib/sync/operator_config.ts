@@ -419,12 +419,17 @@ export const receiveConfigSyncDelete = async function (data: { path: string, las
             plugin.lastSyncPathDeleted.add(data.path)
             try {
                 await plugin.app.vault.adapter.trashLocal(fullPath)
+                plugin.configSyncTasks.deleted = (plugin.configSyncTasks.deleted ?? 0) + 1
+                SyncLogManager.getInstance().addLog('receive', 'SettingSyncDelete', undefined, 'success', data.path,
+                    undefined, { skipPersist: true })
             } finally {
                 // 延时 500ms 清理
                 window.setTimeout(() => {
                     plugin.lastSyncPathDeleted.delete(data.path)
                 }, 500);
             }
+        } else {
+            plugin.configSyncTasks.alreadyAbsent = (plugin.configSyncTasks.alreadyAbsent ?? 0) + 1
         }
     } catch (e) {
         dumpError("[receiveConfigSyncDelete] error:", e)

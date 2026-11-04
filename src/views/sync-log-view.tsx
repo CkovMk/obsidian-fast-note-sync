@@ -64,6 +64,8 @@ interface SyncSummaryStats {
     note?: { upload: number; modify: number; delete: number };
     file?: { upload: number; modify: number; delete: number };
     config?: { upload: number; modify: number; delete: number };
+    folder?: { upload: number; modify: number; delete: number };
+    skippedDeletes?: { note: number; file: number; config: number; folder: number };
 }
 
 const SyncSummaryCard = ({ log }: { log: SyncLog }) => {
@@ -81,8 +83,11 @@ const SyncSummaryCard = ({ log }: { log: SyncLog }) => {
         note = { upload: 0, modify: 0, delete: 0 },
         file = { upload: 0, modify: 0, delete: 0 },
         config = { upload: 0, modify: 0, delete: 0 },
+        folder = { upload: 0, modify: 0, delete: 0 },
+        skippedDeletes,
         hasChanges
     } = stats;
+    const alreadyAbsent = Object.values(skippedDeletes || {}).reduce((sum, count) => sum + count, 0);
 
     // 辅助渲染每一行，如果该类别没有任何变更，则不显示它（符合“只展示有变化的行”）
     // Helper to render each row. If there are no changes in the category, do not display it (matching "only show changed rows")
@@ -93,7 +98,8 @@ const SyncSummaryCard = ({ log }: { log: SyncLog }) => {
         return (
             <div className="fns-summary-row">
                 <div className="fns-summary-label">
-                    <span className={`fns-summary-dot ${iconClass}`} />
+                    <span className={`fns-summary-dot ${iconClass}`}
+                        style={iconClass === 'dot-folder' ? { backgroundColor: '#1E88E5' } : undefined} />
                     <span>{title}</span>
                 </div>
                 <div className="fns-summary-badges">
@@ -158,6 +164,12 @@ const SyncSummaryCard = ({ log }: { log: SyncLog }) => {
                     {renderRow("dot-note", $("ui.log.category_note") || "笔记", note)}
                     {renderRow("dot-attachment", $("ui.log.category_attachment") || "附件", file)}
                     {renderRow("dot-config", $("ui.log.category_config") || "配置", config)}
+                    {renderRow("dot-folder", $("ui.log.category_folder"), folder)}
+                </div>
+            )}
+            {alreadyAbsent > 0 && !isCancelled && (
+                <div className="fns-summary-row" style={{ color: 'var(--text-muted)', fontSize: '11px' }}>
+                    {$("ui.log.summary.already_absent", { count: alreadyAbsent })}
                 </div>
             )}
         </div>

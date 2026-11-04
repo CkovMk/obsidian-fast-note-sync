@@ -1013,7 +1013,7 @@ export const receiveFileSyncDelete = async function (data: ReceivePathMessage, p
     }
   }
 
-  dump(`Receive file delete: `, data.path)
+  dump(`Receive file deletion record: `, data.path)
   const normalizedPath = normalizePath(data.path)
 
   await plugin.lockManager.withLock(normalizedPath, async () => {
@@ -1025,6 +1025,9 @@ export const receiveFileSyncDelete = async function (data: ReceivePathMessage, p
       plugin.lastSyncPathDeleted.add(normalizedPath)
       try {
         await plugin.app.vault.trash(file, false)
+        plugin.fileSyncTasks.deleted = (plugin.fileSyncTasks.deleted ?? 0) + 1
+        SyncLogManager.getInstance().addLog('receive', 'FileSyncDelete', undefined, 'success', data.path,
+          undefined, { skipPersist: true })
         // 服务端推送删除,从哈希表中移除
         plugin.fileHashManager.removeFileHash(normalizedPath)
         plugin.lastSyncMtime.delete(normalizedPath)
@@ -1039,6 +1042,8 @@ export const receiveFileSyncDelete = async function (data: ReceivePathMessage, p
           plugin.lastSyncPathDeleted.delete(normalizedPath)
         }, 500);
       }
+    } else if (!plugin.app.vault.getAbstractFileByPath(normalizedPath)) {
+      plugin.fileSyncTasks.alreadyAbsent = (plugin.fileSyncTasks.alreadyAbsent ?? 0) + 1
     }
   }, { maxRetries: 5, retryInterval: 100 }).catch(e => {
     dumpError(`[FastSync] Failed to receiveFileSyncDelete: ${normalizedPath}`, e);

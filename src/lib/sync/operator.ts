@@ -225,23 +225,36 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     const noteStats = {
       upload: plugin.noteSyncTasks.needUpload,
       modify: plugin.noteSyncTasks.needModify + plugin.noteSyncTasks.needSyncMtime,
-      delete: plugin.noteSyncTasks.needDelete
+      delete: plugin.noteSyncTasks.deleted ?? 0
     };
     const fileStats = {
       upload: plugin.fileSyncTasks.needUpload,
       modify: plugin.fileSyncTasks.needModify + plugin.fileSyncTasks.needSyncMtime,
-      delete: plugin.fileSyncTasks.needDelete
+      delete: plugin.fileSyncTasks.deleted ?? 0
     };
     const configStats = {
       upload: plugin.configSyncTasks.needUpload,
       modify: plugin.configSyncTasks.needModify + plugin.configSyncTasks.needSyncMtime,
-      delete: plugin.configSyncTasks.needDelete
+      delete: plugin.configSyncTasks.deleted ?? 0
+    };
+
+    const folderStats = {
+      upload: plugin.folderSyncTasks.needUpload,
+      modify: plugin.folderSyncTasks.needModify + plugin.folderSyncTasks.needSyncMtime,
+      delete: plugin.folderSyncTasks.deleted ?? 0
+    };
+    const skippedDeletes = {
+      note: plugin.noteSyncTasks.alreadyAbsent ?? 0,
+      file: plugin.fileSyncTasks.alreadyAbsent ?? 0,
+      config: plugin.configSyncTasks.alreadyAbsent ?? 0,
+      folder: plugin.folderSyncTasks.alreadyAbsent ?? 0
     };
 
     const hasChanges = (
       Object.values(noteStats).some(v => v > 0) ||
       Object.values(fileStats).some(v => v > 0) ||
-      Object.values(configStats).some(v => v > 0)
+      Object.values(configStats).some(v => v > 0) ||
+      Object.values(folderStats).some(v => v > 0)
     );
 
     // 汇总本轮写盘失败数：completed 仍然是"已处理数量"（成功+失败），驱动完成判定不变；
@@ -258,6 +271,8 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
       note: noteStats,
       file: fileStats,
       config: configStats,
+      folder: folderStats,
+      skippedDeletes,
       failed: totalFailed
     });
 
@@ -294,7 +309,7 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
 
     const completionText = totalFailed > 0
       ? $("ui.status.completed_with_failures", { count: String(totalFailed) })
-      : $("ui.status.completed");
+      : (hasChanges ? $("ui.status.completed") : $("ui.status.completed_no_changes"));
     if (plugin.settings.isShowNotice) {
       showSyncNotice(completionText);
     }

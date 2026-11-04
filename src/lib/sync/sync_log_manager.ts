@@ -59,6 +59,8 @@ interface SyncSummaryStats {
     note?: { upload: number; modify: number; delete: number };
     file?: { upload: number; modify: number; delete: number };
     config?: { upload: number; modify: number; delete: number };
+    folder?: { upload: number; modify: number; delete: number };
+    skippedDeletes?: { note: number; file: number; config: number; folder: number };
 }
 
 // 高频数据流消息：大库同步时每同步一个笔记/文件/配置/文件夹就会触发一次，量级与库大小成正比。
@@ -340,6 +342,12 @@ export class SyncLogManager {
         // 提取 Vault 信息
         const logVault = msgData.Vault || msgData.vault || msgData.data?.Vault || msgData.data?.vault;
 
+        // Receipt is not a successful deletion: handlers log success only after trash succeeds.
+        // Keep protocol errors visible; aggregate already-absent paths in the round summary.
+        const isDelete = ["NoteSyncDelete", "FileSyncDelete", "FolderSyncDelete", "SettingSyncDelete"].includes(action);
+        const isError = msgData.code !== undefined && (msgData.code === 0 || msgData.code > 200);
+        if (isDelete && !isError) return;
+
         // 根据消息类型调整 action 名称
         let logAction = action;
         const syncTypeActions = ["NoteSync", "FileSync", "SettingSync", "FolderSync", "NoteSyncEnd", "FileSyncEnd", "SettingSyncEnd", "FolderSyncEnd", "SyncEnd"];
@@ -525,6 +533,9 @@ export class SyncLogManager {
                     if (stats.note) parts.push(`Note(up:${stats.note.upload},recv:${stats.note.modify},del:${stats.note.delete})`);
                     if (stats.file) parts.push(`Attachment(up:${stats.file.upload},recv:${stats.file.modify},del:${stats.file.delete})`);
                     if (stats.config) parts.push(`Config(up:${stats.config.upload},recv:${stats.config.modify},del:${stats.config.delete})`);
+                    if (stats.folder) parts.push(`Folder(up:${stats.folder.upload},recv:${stats.folder.modify},del:${stats.folder.delete})`);
+                    const skipped = Object.values(stats.skippedDeletes || {}).reduce((sum, count) => sum + count, 0);
+                    if (skipped > 0) parts.push(`Already absent (no changes): ${skipped}`);
                     msgStr = ` [Msg: Sync completed (${stats.syncType === 'full' ? 'Full' : 'Incremental'}): ${parts.join(', ')}]`;
                 } catch {
                     // 解析失败时使用默认逻辑

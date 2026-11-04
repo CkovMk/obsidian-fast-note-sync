@@ -509,7 +509,7 @@ export const receiveNoteSyncDelete = async function (data: ReceiveMessage, plugi
     plugin.recordSyncCompleted('note', data.pageIndex)
     return
   }
-  dump(`Receive note delete:`, data.path, data.mtime, data.pathHash)
+  dump(`Receive note deletion record:`, data.path, data.mtime, data.pathHash)
   const normalizedPath = normalizePath(data.path)
 
   try {
@@ -522,6 +522,9 @@ export const receiveNoteSyncDelete = async function (data: ReceiveMessage, plugi
         plugin.lastSyncPathDeleted.add(normalizedPath)
         try {
           await plugin.app.vault.trash(file, false)
+          plugin.noteSyncTasks.deleted = (plugin.noteSyncTasks.deleted ?? 0) + 1
+          SyncLogManager.getInstance().addLog('receive', 'NoteSyncDelete', undefined, 'success', data.path,
+            undefined, { skipPersist: true })
           // 服务端推送删除,从哈希表中移除
           plugin.fileHashManager.removeFileHash(normalizedPath)
           plugin.lastSyncMtime.delete(normalizedPath)
@@ -540,6 +543,8 @@ export const receiveNoteSyncDelete = async function (data: ReceiveMessage, plugi
             plugin.lastSyncPathDeleted.delete(normalizedPath)
           }, 500);
         }
+      } else if (!plugin.app.vault.getAbstractFileByPath(normalizedPath)) {
+        plugin.noteSyncTasks.alreadyAbsent = (plugin.noteSyncTasks.alreadyAbsent ?? 0) + 1
       }
     }, { maxRetries: 5, retryInterval: 100 });
   } catch (e) {

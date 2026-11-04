@@ -9,6 +9,9 @@ export interface SyncTaskStats {
   needModify: number;   // 需要修改 / Need to modify
   needSyncMtime: number; // 需要同步时间戳 / Need to sync mtime
   needDelete: number;   // 需要删除 / Need to delete
+  // Display-only outcomes; never substitute these for protocol task/page counters.
+  deleted?: number;       // Successfully moved to local trash
+  alreadyAbsent?: number; // Deletion records that found no local target
   completed: number;    // 已处理数量（含成功与失败，驱动完成判定/翻页 ACK，语义不变） / Processed count (success + failure; drives completion detection / page ACK, semantics unchanged)
   failed: number;       // 其中处理失败的数量，仅用于统计展示，不参与完成判定 / Subset that failed; stats-only, does not affect completion detection
 }

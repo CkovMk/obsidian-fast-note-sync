@@ -268,6 +268,7 @@ export default {
   "ui.status.starting": "開始同步",
   "ui.status.new_version": "發現新版本: ${version}, 點擊後跳轉更新頁面",
   "ui.status.completed": "同步完成",
+  "ui.status.completed_no_changes": "同步完成 — 無變更",
   "ui.status.completed_with_failures": "同步完成，其中 ${count} 項失敗",
   "ui.status.timeout_partial": "同步逾時，部分檔案未完成，將在下一輪同步繼續",
   "ui.status.failed": "同步失敗",
@@ -331,6 +332,7 @@ export default {
   "ui.log.summary.title_cancelled_full": "同步已取消 (全量)",
   "ui.log.summary.title_cancelled_inc": "同步已取消 (增量)",
   "ui.log.summary.no_changes": "無變更",
+  "ui.log.summary.already_absent": "已忽略 ${count} 條刪除記錄：本機路徑已不存在（無變更）。",
 
   // --- ui.log.action ---
   "ui.log.action.ConnectionClosed": "同步連線已中斷",

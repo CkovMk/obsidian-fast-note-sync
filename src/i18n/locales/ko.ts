@@ -268,6 +268,7 @@ export default {
   "ui.status.starting": "동기화 시작",
   "ui.status.new_version": "새 버전 발견: ${version}, 클릭하면 업데이트 페이지로 이동합니다",
   "ui.status.completed": "동기화 완료",
+  "ui.status.completed_no_changes": "동기화 완료 — 변경 없음",
   "ui.status.completed_with_failures": "동결 완료, ${count}개 항목 실패",
   "ui.status.timeout_partial": "동결 시간 초과, 일부 파일이 완료되지 않았으며 다음 동결 주기에서 계속 진행됩니다",
   "ui.status.failed": "동기화 실패",
@@ -331,6 +332,7 @@ export default {
   "ui.log.summary.title_cancelled_full": "동기화가 취소되었습니다 (전체)",
   "ui.log.summary.title_cancelled_inc": "동기화가 취소되었습니다 (증분)",
   "ui.log.summary.no_changes": "변경 없음",
+  "ui.log.summary.already_absent": "삭제 기록 ${count}개 무시: 로컬 경로가 이미 없습니다(변경 없음).",
 
   // --- ui.log.action ---
   "ui.log.action.VaultScanning_full": "노트 보관소 해시 계산 진행률(전체)",
