@@ -43,7 +43,8 @@ function load(file, extra = {}, globals = {}) {
 console.log('PASS: negotiated page completion');
 {
   const { checkSyncCompletion } = load('src/lib/sync/operator.ts', {
-    '../../i18n/lang': { $: key => key }
+    '../../i18n/lang': { $: key => key },
+    './operator_file': { sweepStalledDownloadSessions: noop },
   }, { WebSocket: { OPEN: 1 } });
   for (const failed of [0, 1]) {
     const metadata = new Map();

@@ -155,7 +155,7 @@ function restartStalledSync(plugin: FastSync, intervalId?: number): void {
   plugin.totalChunksToUpload = 0;
   plugin.uploadedChunksCount = 0;
   plugin.isSyncing = false;
-  plugin.progressTracker.forceComplete();
+  plugin.progressTracker.stop();
   plugin.updateStatusBar("Sync stalled, restarting…");
   window.setTimeout(() => {
     if (plugin.websocket.isOpen && !plugin.isSyncing) {
@@ -180,41 +180,6 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     }
     return;
   }
-  // 超时保底：调大为 300s 以支持超大库（多批次）的分批同步，防止误判超时终止
-  // Safety timeout: increased to 300s to support large vaults with many batches, preventing false timeout termination
-  const SYNC_TIMEOUT_MS = 300000;
-  if (syncStartTime && Date.now() - syncStartTime > SYNC_TIMEOUT_MS) {
-    if (intervalId) {
-      window.clearInterval(intervalId);
-      if (plugin.syncState.progressCheckIntervalId === intervalId) {
-        plugin.syncState.progressCheckIntervalId = null;
-      }
-    }
-    dump(`Sync completion timeout after ${SYNC_TIMEOUT_MS}ms. Tasks: note=${JSON.stringify(plugin.noteSyncTasks)}, file=${JSON.stringify(plugin.fileSyncTasks)}, folder=${JSON.stringify(plugin.folderSyncTasks)}, config=${JSON.stringify(plugin.configSyncTasks)}`)
-    plugin.syncState.activeSyncContext = null; // 同步超时，清空活跃的上下文 / Sync timeout, reset the active context
-    plugin.syncTypeCompleteCount = 0;
-    plugin.resetSyncTasks();
-    plugin.syncPageStateMap.clear(); // 清空残留的页状态 / Clear stale page state map
-    plugin.totalFilesToDownload = 0;
-    plugin.downloadedFilesCount = 0;
-    plugin.totalChunksToDownload = 0;
-    plugin.downloadedChunksCount = 0;
-    plugin.totalChunksToUpload = 0;
-    plugin.uploadedChunksCount = 0;
-    plugin.progressTracker.forceComplete();
-    // 超时保底不代表真正完成：仍有下载会话未结束时，如实提示"部分未完成"，而非静默上报成功
-    // A safety timeout does not mean genuine completion: if download sessions are still pending,
-    // surface "partially incomplete" instead of silently reporting success
-    if (plugin.fileDownloadSessions.size > 0) {
-      dump(`Sync completion timeout with ${plugin.fileDownloadSessions.size} unfinished file download session(s), reporting partial completion.`);
-      plugin.updateStatusBar($("ui.status.timeout_partial"));
-    } else {
-      plugin.updateStatusBar($("ui.status.completed"));
-    }
-    window.setTimeout(() => plugin.updateStatusBar(""), 10000);
-    return;
-  }
-
   void sweepStalledDownloadSessions(plugin);
 
   if (ownerContext && isSyncStalled(plugin, ownerContext)) {
@@ -238,12 +203,15 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     (!plugin.settings.configSyncEnabled || configSyncDone);
 
   const allDownloadsComplete = plugin.fileDownloadSessions.size === 0;
+  const allUploadsComplete = !plugin.pendingUploadHashes?.size && !plugin.pendingNoteModifies?.size &&
+    !plugin.pendingConfigModifies?.size && plugin.concurrencyLimiter?.isIdle?.() !== false;
   const bufferCleared = bufferedAmount === 0;
 
   // 计算整体权重进度
   const overallPercentage = plugin.progressTracker.getOverallPct();
 
-  if (allSyncDone && allDownloadsComplete && bufferCleared && !plugin.isSyncRequesting) {
+  if (allSyncDone && allDownloadsComplete && allUploadsComplete && bufferCleared && !plugin.isSyncRequesting) {
+    plugin.fileHashManager?.flush?.();
     if (intervalId) {
       window.clearInterval(intervalId);
       if (plugin.syncState.progressCheckIntervalId === intervalId) {
@@ -369,7 +337,9 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
     // Refresh share indicator state after sync completion
     void plugin.shareIndicatorManager?.syncWithServer();
 
-    window.setTimeout(() => plugin.updateStatusBar(""), 10000);
+    window.setTimeout(() => {
+      if (!plugin.syncState.activeSyncContext) plugin.updateStatusBar("");
+    }, 10000);
   } else {
     // --- 强制完成逻辑与 90% 补偿 ---
     let statusText = $("ui.status.syncing");
@@ -1286,6 +1256,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
     // clobber a newer session that has already taken over.
     if (plugin.syncState.activeSyncContext === context) {
       plugin.syncDiagnostics?.end("failed");
+      plugin.progressTracker.stop();
       plugin.syncState.activeSyncContext = null; // 同步失败，清空上下文 / Sync failed, reset the context
       plugin.updateStatusBar($("ui.status.failed") || "Sync Failed");
       window.setTimeout(() => plugin.updateStatusBar(""), 10000);
@@ -1345,9 +1316,11 @@ export function cancelSync(plugin: FastSync): void {
   plugin.pendingUploadHashes.clear();
   plugin.localStorageManager.clearPending('pendingUploadHashes');
 
-  plugin.progressTracker.forceComplete();
+  plugin.progressTracker.stop();
   plugin.updateStatusBar($("ui.status.cancelled") || "Sync Cancelled");
-  window.setTimeout(() => plugin.updateStatusBar(""), 10000);
+  window.setTimeout(() => {
+    if (!plugin.syncState.activeSyncContext) plugin.updateStatusBar("");
+  }, 10000);
 
   // 记录一条“同步取消”的小结日志，供同步日志视图渲染卡片 / Record a "Sync Cancelled" summary log for rendering in the Sync Log View
   const syncType = plugin.syncState.currentSyncType;

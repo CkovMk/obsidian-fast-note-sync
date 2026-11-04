@@ -167,6 +167,7 @@ export class WebSocketManager {
       },
       onClose: (client, code, reason) => {
         this.plugin.syncDiagnostics?.end("disconnected");
+        this.plugin.progressTracker?.stop?.();
         SyncLogManager.getInstance().addLog('error', 'ConnectionClosed',
           `WebSocket closed: ${code} ${reason}`, 'error');
         if (this.plugin.isSyncing) {
@@ -421,10 +422,10 @@ export class WebSocketManager {
         return;
       }
 
-      // 基于 Context 进行过滤：如果处于活跃的同步中，必须完全匹配
       if (this.plugin.fileHashManager?.isReady?.() === false &&
         msgAction !== WSAction.ClientReceiveAuth && msgAction !== WSAction.ClientReceiveInfo) return;
 
+      // 基于 Context 进行过滤：如果处于活跃的同步中，必须完全匹配
       // Filter based on Context: if there's an active sync context, incoming messages (including Acks) must match
       if (this.plugin.syncState.activeSyncContext) {
         const isControlMsg = msgAction === WSAction.ClientReceiveAuth || msgAction === WSAction.ClientReceiveInfo;

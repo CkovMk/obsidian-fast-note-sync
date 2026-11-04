@@ -28,13 +28,17 @@ const { ConcurrencyLimiter } = load('src/lib/sync/concurrency_limiter.ts');
   const statuses = [];
   const fail = () => { throw new Error('unfinished sync must not be reset or completed'); };
   const { checkSyncCompletion } = load('src/lib/sync/operator.ts', {
-    '../../i18n/lang': { $: key => key }
+    '../../i18n/lang': { $: key => key },
+    './operator_file': { sweepStalledDownloadSessions: noop },
   }, { WebSocket: { OPEN: 1 } });
   const p = {
     syncState: { activeSyncContext: 'long-running' }, isSyncing: true,
     settings: { syncEnabled: true, configSyncEnabled: true },
     websocket: { ws: { readyState: 1, bufferedAmount: 0 } },
     fileDownloadSessions: new Map(),
+    noteSyncTasks: { completed: 0, failed: 0 }, fileSyncTasks: { completed: 0, failed: 0 },
+    folderSyncTasks: { completed: 0, failed: 0 }, configSyncTasks: { completed: 0, failed: 0 },
+    concurrencyLimiter: { activeKeys: new Set(['active-upload']), queue: [] },
     progressTracker: { isTypeFullyDone: () => false, getOverallPct: () => 100,
       getDetailText: () => 'pending uploads', forceComplete: fail },
     resetSyncTasks: fail,
@@ -126,6 +130,12 @@ function fixture(content = 'same', base = 'same', pending = true) {
   manager.handleStructuredMessage('NoteSyncMtime', { code: 200, data: { path: 'unrelated.md' } });
   manager.handleStructuredMessage('NoteSyncMtime', { code: 200, vault: 'other', data: { path: 'test.md' } });
   assert.equal(received.length, 1, 'stale contexts, unrelated paths and other vaults must stay rejected');
+  manager.plugin.fileHashManager = { isReady: () => false };
+  manager.handleStructuredMessage('NoteSyncMtime', { code: 200, data: { path: 'test.md' } });
+  assert.equal(received.length, 1, 'incoming mutations stay blocked during restore/recovery');
+  manager.plugin.fileHashManager.isReady = () => true;
+  manager.handleStructuredMessage('NoteSyncMtime', { code: 200, data: { path: 'test.md' } });
+  assert.equal(received.length, 2, 'incoming mutations resume only after recovery is ready');
 }
 console.log('PASS: queue recovery, mtime ACK release/page attribution/context routing, identical replay, baseline replay, true conflict protection');
 

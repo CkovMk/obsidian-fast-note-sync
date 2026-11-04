@@ -65,6 +65,7 @@ export class SyncProgressTracker {
 
   // Track if synchronization has been officially completed / 标记同步是否已正式完成
   private isForcedComplete = false;
+  private isStopped = false;
 
   // --- 多页在途：15s 无明细停滞重发最高已确认页 ack 的轻量 timer（设计稿 §4.5）---
   // 挂在 progressTracker 上而非按页单独起 timer，同步结束/取消（reset/forceComplete）时统一清理
@@ -130,6 +131,12 @@ export class SyncProgressTracker {
     this.lastReportedPct = 0;
     this.hashProgress = 0;
     this.isForcedComplete = false;
+    this.isStopped = false;
+    if (this.notifyTimer !== null) window.clearTimeout(this.notifyTimer);
+    this.notifyTimer = null;
+    this.notifyPending = false;
+    this.lastNotifiedPct = -1;
+    this.lastNotifiedPhase = null;
 
     // 新一轮同步开始，清空上一轮遗留的停滞重发 timer（设计稿 §4.5：同步结束/取消时清理）
     // New sync round starting; clear any stagnation-resend timers left from the previous round
@@ -218,6 +225,7 @@ export class SyncProgressTracker {
    *   accounting in the pages Map + ack watermark advance.
    */
   recordCompleted(type: SyncType, pageIndex?: number): void {
+    if (this.isForcedComplete || this.isStopped) return;
     const prog = this.progressMap.get(type);
     if (!prog) return;
 
@@ -376,6 +384,7 @@ export class SyncProgressTracker {
    * 记录分页控制消息元数据。
    */
   recordPageProgress(type: SyncType, pageIndex: number, totalCount: number, isLast: boolean, requirePageCompletion = false): void {
+    if (this.isForcedComplete || this.isStopped) return;
     const prog = this.progressMap.get(type);
     if (!prog) return;
     prog.requirePageCompletion ||= requirePageCompletion;
@@ -428,7 +437,11 @@ export class SyncProgressTracker {
    * 当同步完成时，强制将进度推到 100%。
    */
   forceComplete(): void {
+    if (this.isForcedComplete || this.isStopped) return;
     this.isForcedComplete = true;
+    if (this.notifyTimer !== null) window.clearTimeout(this.notifyTimer);
+    this.notifyTimer = null;
+    this.notifyPending = false;
     // 同步已结束（完成/取消/超时保底），清理所有停滞重发 timer（设计稿 §4.5）
     // Sync has ended (completed/cancelled/timeout fallback); clear all stagnation-resend timers
     for (const timer of this.stagnationTimers.values()) {
@@ -442,6 +455,20 @@ export class SyncProgressTracker {
     if (this.onProgressChange) {
       this.onProgressChange(100, this.getDetailText(), 'idle');
     }
+  }
+
+  /** Retire an interrupted round without publishing a successful 100% event. */
+  stop(): void {
+    if (this.isStopped || this.isForcedComplete) return;
+    const pct = this.getOverallPct();
+    this.isStopped = true;
+    if (this.notifyTimer !== null) window.clearTimeout(this.notifyTimer);
+    this.notifyTimer = null;
+    this.notifyPending = false;
+    for (const timer of this.stagnationTimers.values()) window.clearTimeout(timer);
+    this.stagnationTimers.clear();
+    this.onChange?.(pct, this.getDetailText(), 'idle');
+    this.onProgressChange?.(pct, this.getDetailText(), 'idle');
   }
 
   /**
@@ -614,6 +641,7 @@ export class SyncProgressTracker {
   }
 
   private notify(): void {
+    if (this.isForcedComplete || this.isStopped) return;
     const pct = this.getOverallPct();
     const phase = this.getPhase();
     const changed = pct !== this.lastNotifiedPct || phase !== this.lastNotifiedPhase;

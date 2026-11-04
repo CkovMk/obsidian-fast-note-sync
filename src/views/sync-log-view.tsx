@@ -244,7 +244,7 @@ const SyncProgressBanner = ({ plugin }: { plugin: FastSync }) => {
 
         const handler = (data: SyncProgressPayload) => {
             if (hideTimer) window.clearTimeout(hideTimer);
-            setProgress({ ...data, visible: true });
+            setProgress({ ...data, visible: data.phase !== 'idle' || data.pct === 100 });
 
             if (data.pct === 100) {
                 // Auto-hide 2s after completion / 完成后 2 秒自动隐藏

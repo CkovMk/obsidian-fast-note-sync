@@ -120,6 +120,7 @@ export class StatusBarManager {
    */
   render(pct: number, detail: string, phase: 'hash' | 'upload' | 'download' | 'idle'): void {
     if (!this.statusBarItem) return;
+    if (phase === 'hash' && pct === 0) this.lastPct = 0;
 
     this.statusBarItem.removeClass("fns-hidden");
     this.statusBarItem.addClass("fns-status-bar-progress");
