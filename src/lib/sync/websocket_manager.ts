@@ -166,6 +166,7 @@ export class WebSocketManager {
         dump("Service authorization");
       },
       onClose: (client, code, reason) => {
+        this.plugin.syncDiagnostics?.end("disconnected");
         SyncLogManager.getInstance().addLog('error', 'ConnectionClosed',
           `WebSocket closed: ${code} ${reason}`, 'error');
         if (this.plugin.isSyncing) {
@@ -421,6 +422,9 @@ export class WebSocketManager {
       }
 
       // 基于 Context 进行过滤：如果处于活跃的同步中，必须完全匹配
+      if (this.plugin.fileHashManager?.isReady?.() === false &&
+        msgAction !== WSAction.ClientReceiveAuth && msgAction !== WSAction.ClientReceiveInfo) return;
+
       // Filter based on Context: if there's an active sync context, incoming messages (including Acks) must match
       if (this.plugin.syncState.activeSyncContext) {
         const isControlMsg = msgAction === WSAction.ClientReceiveAuth || msgAction === WSAction.ClientReceiveInfo;
@@ -453,6 +457,7 @@ export class WebSocketManager {
           const merged = { ...data.data };
           if (data.context) merged.context = data.context;
           if (pageIndex !== undefined) merged.pageIndex = pageIndex;
+          if (msgAction === WSAction.FileUpload) this.plugin.syncDiagnostics?.wireUpload(merged);
           // Destructive handlers must see the exact server spelling: the path guard
           // compares it with the resolved local file before deleting, renaming or
           // overwriting. Preserve it across the whole file-download handshake too.
@@ -559,10 +564,14 @@ export class WebSocketManager {
       const startTime = Date.now();
 
       while (!this.plugin.fileHashManager || !this.plugin.fileHashManager.isReady()) {
+        if (this.plugin.fileHashManager?.requiresRecovery?.()) {
+          dump("Hash-state recovery required; automatic sync paused");
+          return;
+        }
         if (Date.now() - startTime > maxWaitTime) {
           dump(`FileHashManager initialization timeout after ${maxWaitTime}ms`);
           showSyncNotice("文件哈希管理器初始化超时,同步可能不稳定");
-          break;
+          return;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 100));
       }

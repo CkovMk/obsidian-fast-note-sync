@@ -331,6 +331,9 @@ export default {
   "ui.log.summary.title_cancelled_full": "同步已取消 (全量)",
   "ui.log.summary.title_cancelled_inc": "同步已取消 (增量)",
   "ui.log.summary.no_changes": "无变更",
+  "ui.log.copy_sync_diagnostics": "复制同步诊断信息（JSON）",
+  "ui.log.sync_diagnostics_copied": "同步诊断信息已复制，请保存为原始 .json 文件。包含路径和哈希，不包含凭据或文件内容。",
+  "ui.log.sync_diagnostics_copy_failed": "无法复制同步诊断信息，请检查剪贴板权限后重试。",
 
   // --- ui.log.action ---
   "ui.log.action.ConnectionClosed": "同步连接已断开",

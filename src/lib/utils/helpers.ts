@@ -326,6 +326,8 @@ export const configIsPathExcluded = function (relativePath: string, plugin: Fast
     normalizedPath === `${pluginSelfDir}/fileHashMap.json` ||
     normalizedPath === `${pluginSelfDir}/syncHashMap.json` ||
     normalizedPath === `${pluginSelfDir}/folderSnapshot.json` ||
+    normalizedPath === `${pluginSelfDir}/hash-state-backups` ||
+    normalizedPath.startsWith(`${pluginSelfDir}/hash-state-backups/`) ||
     normalizedPath === `${pluginSelfDir}/conflict-notes` ||
     normalizedPath.startsWith(`${pluginSelfDir}/conflict-notes/`)
   ) {
@@ -770,6 +772,8 @@ export class LocalStateFileMirror {
   private isWriting: boolean = false;
   private rerunAfterWrite: boolean = false;
   private writeTimer: number | null = null;
+  private lastWriteSucceeded: boolean | null = null;
+  private writePromise: Promise<void> | null = null;
 
   constructor(plugin: FastSync, fileName: string) {
     this.plugin = plugin;
@@ -781,13 +785,14 @@ export class LocalStateFileMirror {
   /**
    * 读取镜像文件内容；不存在或异常均返回 null，绝不弹 toast
    */
-  async read(): Promise<string | null> {
+  async read(strict: boolean = false): Promise<string | null> {
     try {
       const exists = await this.plugin.app.vault.adapter.exists(this.mirrorPath);
       if (!exists) return null;
       return await this.plugin.app.vault.adapter.read(this.mirrorPath);
     } catch (error) {
       dump(`LocalStateFileMirror: 读取镜像文件失败: ${this.mirrorPath}`, error);
+      if (strict) throw error;
       return null;
     }
   }
@@ -817,12 +822,16 @@ export class LocalStateFileMirror {
     this.isWriting = true;
     this.pendingWrite = false;
     const data = this.latestData;
-    void this.plugin.app.vault.adapter.write(this.mirrorPath, data)
+    this.writePromise = this.plugin.app.vault.adapter.write(this.mirrorPath, data)
+      .then(() => { this.lastWriteSucceeded = true; })
       .catch((error) => {
+        this.lastWriteSucceeded = false;
+        this.pendingWrite = true;
         dump(`LocalStateFileMirror: 写入镜像文件失败: ${this.mirrorPath}`, error);
       })
       .finally(() => {
         this.isWriting = false;
+        this.writePromise = null;
         if (this.rerunAfterWrite) {
           this.rerunAfterWrite = false;
           this.pendingWrite = true;
@@ -841,6 +850,16 @@ export class LocalStateFileMirror {
     }
     if (!this.pendingWrite) return;
     this.doWrite();
+  }
+
+  getWriteDiagnostics() {
+    return { pending: this.pendingWrite, writing: this.isWriting, lastWriteSucceeded: this.lastWriteSucceeded };
+  }
+
+  async flushAsync(): Promise<void> {
+    this.flush();
+    while (this.writePromise) await this.writePromise;
+    if (this.pendingWrite || this.lastWriteSucceeded === false) throw new Error("Hash mirror write did not persist");
   }
 }
 

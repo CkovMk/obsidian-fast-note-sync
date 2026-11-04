@@ -332,6 +332,9 @@ export default {
   "ui.log.summary.title_cancelled_full": "Sync cancelled (full)",
   "ui.log.summary.title_cancelled_inc": "Sync cancelled (incremental)",
   "ui.log.summary.no_changes": "No changes",
+  "ui.log.copy_sync_diagnostics": "Copy sync diagnostics (JSON)",
+  "ui.log.sync_diagnostics_copied": "Sync diagnostics copied. Save as a raw .json file; paths and hashes are included, but not credentials or file contents.",
+  "ui.log.sync_diagnostics_copy_failed": "Could not copy sync diagnostics. Check clipboard permissions and try again.",
 
   // --- ui.log.action ---
   "ui.log.action.ConnectionClosed": "Sync connection closed",

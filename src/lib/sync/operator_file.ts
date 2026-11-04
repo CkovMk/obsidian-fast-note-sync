@@ -619,6 +619,7 @@ export const receiveFileUpload = async function (data: FileUploadMessage, plugin
     plugin.recordSyncCompleted('file', data.pageIndex)
     return
   }
+  plugin.syncDiagnostics?.uploadRequest(data, file)
   if (isLargeBinarySyncRisk(file.stat.size, plugin)) {
     dump(`Skip file upload for large attachment (${describeBinarySyncLimit()} limit): ${data.path}`, file.stat.size)
     notifyLargeFileSkipped(plugin, data.path, file.stat.size, `Fast Note Sync skipped large file upload: ${data.path}`)
@@ -675,6 +676,7 @@ export const receiveFileUpload = async function (data: FileUploadMessage, plugin
       }
 
       const contentHash = await hashFileAsync(plugin.app, file.path)
+      await plugin.syncDiagnostics?.beforeUpload(data.sessionId, contentHash)
       logMemorySnapshot(`after upload hash ${data.path}`)
       // 将 hash 暂存到 pending map，等待服务端 FileUploadAck 后再写入 hashManager
       // Temporarily store hash in pending map, update hashManager only after server FileUploadAck
@@ -1645,6 +1647,7 @@ export const receiveFileRenameAck = function (data: { lastTime?: number }, plugi
 // 收到 FileUploadAck，将 pending hash 转移到正式 hashManager 并更新 lastFileSyncTime
 // Receive FileUploadAck, move pending hash to formal hashManager and update lastFileSyncTime
 export const receiveFileUploadAck = function (data: { lastTime?: number; path?: string; pathHash?: string }, plugin: FastSync) {
+  plugin.syncDiagnostics?.uploadAck(data)
   // 服务端确认上传成功，将 pending hash 转移到正式 hashManager
   // Server confirmed upload success, move pending hash to formal hashManager
   if (data.path) {

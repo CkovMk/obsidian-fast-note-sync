@@ -140,6 +140,7 @@ function restartStalledSync(plugin: FastSync, intervalId?: number): void {
     id: `stall-${Date.now()}`, type: 'info', action: 'SyncSummary', status: 'error',
     message: 'Sync stalled waiting for server pages; restarting a new round', timestamp: Date.now()
   });
+  plugin.syncDiagnostics?.end("stalled");
   plugin.syncState.activeSyncContext = null;
   plugin.syncTypeCompleteCount = 0;
   plugin.resetSyncTasks();
@@ -300,6 +301,7 @@ export function checkSyncCompletion(plugin: FastSync, intervalId?: number, syncS
       message: summaryMessage,
       timestamp: Date.now()
     });
+    plugin.syncDiagnostics?.finish(JSON.parse(summaryMessage));
 
     // C9: 在 resetSyncTasks（会连带重置 offlineGuardSkippedThisRound）之前先取走本轮是否被
     // 离线超墓碑期保护拦截过的标记，用于下方决定是否可信地刷新 lastSyncSuccessTime
@@ -646,6 +648,10 @@ async function receiveSyncEndWrapper(data: unknown, plugin: FastSync, type: "not
  * 启动全量/增量同步
  */
 export const handleSync = async function (plugin: FastSync, isLoadLastTime: boolean = true, syncMode: SyncMode = "auto") {
+  if (plugin.fileHashManager?.isReady?.() === false) {
+    showSyncNotice("Hash state is not ready. Resolve saved-state recovery before syncing.");
+    return;
+  }
   if (plugin.isSyncing) {
     dump("Sync already in progress, skipping");
     return;
@@ -698,6 +704,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
     plugin.currentSyncType = isLoadLastTime ? 'incremental' : 'full';
     plugin.syncTypeCompleteCount = 0;
     plugin.resetSyncTasks();
+    plugin.syncDiagnostics?.start(isLoadLastTime);
 
     const shouldSyncNotes = syncMode === "auto" || syncMode === "note";
     const shouldSyncConfigs = syncMode === "auto" || syncMode === "config";
@@ -1228,6 +1235,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
 
     const noteData: NoteSyncData = { lastTime: noteTime, notes, delNotes, missingNotes };
     const fileData: FileSyncData = { lastTime: fileTime, files, delFiles, missingFiles };
+    plugin.syncDiagnostics?.scan(files, fileTime);
     const configData: ConfigSyncData = { lastTime: configTime, configs, delConfigs, missingConfigs };
     const folderData: FolderSyncData = { lastTime: folderTime, folders, delFolders, missingFolders };
 
@@ -1277,6 +1285,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
     // invocation, so a late exception from a superseded (stale) sync session cannot
     // clobber a newer session that has already taken over.
     if (plugin.syncState.activeSyncContext === context) {
+      plugin.syncDiagnostics?.end("failed");
       plugin.syncState.activeSyncContext = null; // 同步失败，清空上下文 / Sync failed, reset the context
       plugin.updateStatusBar($("ui.status.failed") || "Sync Failed");
       window.setTimeout(() => plugin.updateStatusBar(""), 10000);
@@ -1299,6 +1308,7 @@ export const handleSync = async function (plugin: FastSync, isLoadLastTime: bool
  * Cancel the current sync and reset all runtime states.
  */
 export function cancelSync(plugin: FastSync): void {
+  plugin.syncDiagnostics?.end("cancelled");
   if (plugin.syncState.progressCheckIntervalId !== null) {
     window.clearInterval(plugin.syncState.progressCheckIntervalId);
     plugin.syncState.progressCheckIntervalId = null;

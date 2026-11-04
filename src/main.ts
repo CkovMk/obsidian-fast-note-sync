@@ -31,6 +31,7 @@ import { $ } from "./i18n/lang";
 import { SsoImportModal } from "./views/sso-import-modal";
 import { StatusBarManager } from "./lib/ui/status_bar_manager";
 import { SyncProgressTracker } from "./lib/sync/sync_progress_tracker";
+import { SyncDiagnostics } from "./lib/sync/sync_diagnostics";
 
 
 
@@ -66,6 +67,7 @@ export default class FastSync extends Plugin {
   fileCloudPreview: FileCloudPreview              // 云端文件预览管理器
   folderSnapshotManager: FolderSnapshotManager    // 文件夹快照管理器
   statusBarManager: StatusBarManager              // 状态栏管理器
+  syncDiagnostics: SyncDiagnostics                // Bounded metadata-only debugging snapshots
   readonly progressTracker = new SyncProgressTracker() // 进度追踪器
   private menuManagerInitialized = false          // 防止 onLayoutReady 重复初始化 / Guard against duplicate onLayoutReady init
 
@@ -403,6 +405,7 @@ export default class FastSync extends Plugin {
     this.websocket = new WebSocketManager(this)
 
     await this.loadSettings()
+    this.syncDiagnostics = new SyncDiagnostics(this)
 
     // Initialize VersionManager after settings are loaded to avoid reading undefined 'settings.vault'
     // 在加载设置后初始化 VersionManager，避免在 settings 未加载时访问 settings.vault
@@ -523,6 +526,41 @@ export default class FastSync extends Plugin {
         name: $("ui.log.debug_title"),
         callback: () => {
           new DebugLogModal(this.app).open();
+        },
+      });
+
+      this.addCommand({
+        id: "copy-sync-diagnostics",
+        name: $("ui.log.copy_sync_diagnostics"),
+        callback: () => {
+          void navigator.clipboard.writeText(this.syncDiagnostics.exportJSON()).then(() => {
+            showSyncNotice($("ui.log.sync_diagnostics_copied"));
+          }).catch(() => {
+            showSyncNotice($("ui.log.sync_diagnostics_copy_failed"));
+          });
+        },
+      });
+
+      this.addCommand({
+        id: "recover-hash-state-from-mirrors",
+        name: "Recover saved hash state from mirrors",
+        callback: () => {
+          if (!this.fileHashManager || this.isSyncing) {
+            showSyncNotice("Finish or cancel the current sync before recovering hash state.");
+            return;
+          }
+          void import("./views/confirm-modal").then(({ ConfirmModal }) => {
+            new ConfirmModal(this.app, "Recover saved hash state",
+              "Use this device's file mirrors as the saved hash state? Both current sources will be backed up. " +
+              "No note contents or sync cursors are changed. Restart Obsidian after recovery.", () => {
+                void this.fileHashManager.recoverFromMirrors().then(() => {
+                  showSyncNotice("Hash state recovered. Restart Obsidian before syncing.");
+                }).catch((error: unknown) => {
+                  dump("Hash-state recovery failed", error);
+                  showSyncNotice("Hash-state recovery failed; sync is paused. Existing backups were not removed.");
+                });
+              }).open();
+          });
         },
       });
 

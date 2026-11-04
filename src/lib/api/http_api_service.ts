@@ -140,6 +140,8 @@ export interface FileInfoResponse {
     contentHash: string;
     isRecycle: boolean;
     updatedAt: string;
+    ctime?: number;
+    lastTime?: number;
 }
 
 export interface ApiResponse<T = unknown> {
