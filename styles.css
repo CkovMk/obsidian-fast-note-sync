@@ -771,6 +771,17 @@
   font-size: 12px;
   background: var(--background-secondary-alt);
 }
+.conflict-resolve-diff-wrap .conflict-diff-col .conflict-diff-content .conflict-diff-skipped {
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-family: var(--font-interface);
+  line-height: 1.6;
+  text-align: center;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+  margin: 8px 4px;
+}
 .conflict-resolve-diff-wrap .conflict-diff-col .conflict-diff-content .history-detail-line {
   display: flex;
   align-items: center;
